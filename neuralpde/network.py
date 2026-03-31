@@ -8,8 +8,6 @@ import warnings
 from pathlib import Path
 from typing import List, Tuple
 
-from torchviz import make_dot
-
 from . import layer
 
 
