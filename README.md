@@ -313,24 +313,55 @@ We're trying something related but different enough to warrant a unique/our own 
 The author suggests users of this software use Anaconda/conda to maintain the python environment in which this code operates, but you should use whatever works and what you know best.
 
 ### Conda
-The following commands should Just Work™ with conda to create an environment called neuralpde in which this code will run.  Begin by creating the environment,
+The following commands should work with conda to create an environment called neuralpde in which this code will run.  Begin by creating the environment,
 ```shell
-conda create -n neuralpde python=3.11 ipython scipy numpy matplotlib jupyter jupyterlab tqdm basemap basemap-data-hires netcdf4 -c conda-forge
+conda create -n neuralpde python=3.11 pip
 ```
-You must also install a suitable version of PyTorch.  This was previously possible with conda, but the PyTorch collaboration ceased its official support for the platform, so PyPI/pip is the only remaining convenient way of doing so.
+Use conda to manage the Python version and environment itself, but install the project dependencies with `pip` after activation.  This avoids mixing compiled packages from `conda-forge` with PyPI wheels for PyTorch, which can cause OpenMP runtime conflicts on Windows.
 
 Be sure to activate the new environment you just created.  In this tutorial, that is probably with the command `conda activate neuralpde`.
+
+Then install the non-PyTorch dependencies with `pip`,
+```shell
+conda activate neuralpde
+python -m pip install ipython scipy numpy matplotlib jupyter jupyterlab tqdm basemap basemap-data-hires netcdf4
+```
+
+Finally, install a suitable version of PyTorch.  This was previously possible with conda, but the PyTorch collaboration ceased its official support for the platform, so PyPI/pip is the only remaining convenient way of doing so.
 
 Go to [pytorch.org](https://pytorch.org/), scroll down, and select a suitable version of PyTorch for your machine.  With CUDA, the command you need is most likely,
 ```shell
 conda activate neuralpde
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 ```
 Without CUDA, it is most likely,
 ```shell
 conda activate neuralpde
-pip install torch torchvision torchaudio
+python -m pip install torch torchvision torchaudio
 ```
+
+#### Altogether
+```shell
+conda create -n neuralpde python=3.11 pip
+conda activate neuralpde
+python -m pip install ipython scipy numpy matplotlib jupyter jupyterlab tqdm basemap basemap-data-hires netcdf4
+```
+Finally, with CUDA:
+```shell
+conda activate neuralpde
+python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+```
+Without CUDA:
+```shell
+conda activate neuralpde
+python -m pip install torch torchvision torchaudio
+```
+
+(You can omit repeated `conda activate neuralpde` commands if you're certain that you're in the right environment.)
+
+
+#### Do I need `python -m pip install ...`?
+Yes.  Unfortunately, on Windows in particular though possibly affecting other systems, path management can be imprecise or commands may exist in multiple locations.  `python -m pip install ...` guarantees installed packages are placed where the python used to invoke that command can find them.
 
 ### Not Conda
 Uhhh, somehow install these packages:
