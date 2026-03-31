@@ -186,7 +186,7 @@ def main(date,
                         (date,
                         date + datetime.timedelta(days=1),
                         *(date + datetime.timedelta(days=offset + t) for t in range(timesteps)))))
-        data = neuralpde.nc.SeaIceV4(sorted([f'data/V4/seaice_conc_daily_nh_{y}_v04r00.nc' for y in iter(years)]))
+        data = neuralpde.nc.SeaIceV6(sorted([f'data/V4/seaice_conc_daily_nh_{y}_v04r00.nc' for y in iter(years)]))
         date_idx = np.searchsorted(data.date, date)
         neuralpde.nc.check_boundaries([date_idx, date_idx + 1] + [date_idx + offset + t for t in range(timesteps)], data)
 
