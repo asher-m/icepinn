@@ -13,11 +13,11 @@ from typing import List, Tuple
 
 
 
-def _g02202_date_to_date_core(g02202_date) -> datetime.datetime:
+def g02202_date_to_date_core(g02202_date) -> datetime.datetime:
     return datetime.date(year=1601, month=1, day=1) + datetime.timedelta(days=int(g02202_date))
 
 
-g02202_date_to_date = np.vectorize(_g02202_date_to_date_core)
+g02202_date_to_date = np.vectorize(g02202_date_to_date_core)
 """
 Return the date as a datetime object.
 """
