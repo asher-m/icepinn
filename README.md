@@ -382,6 +382,19 @@ torchaudio
 ```
 where you install the most appropriate versions of the `torch*` packages for your system.
 
+### Installing `neuralpde`
+After setting up the environment, install the package: from the package root, if using conda run
+```shell
+conda activate neuralpde
+python -m pip install --editable .
+```
+If not using conda, simply run
+```shell
+python -m pip install --editable .
+```
+
+If you do not wish to develop the package, or it serves no purpose for it to be installed as an editable package, simply omit `--editable`.
+
 
 ## Sea Ice Data
 ### Version 6
