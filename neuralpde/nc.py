@@ -14,6 +14,24 @@ from typing import List, Tuple
 
 
 
+def date2datetime64(dt: datetime.date) -> np.datetime64:
+    return np.datetime64(dt, 'D')
+
+
+def lonlat2cartesian(longitude, latitude):
+    longitude = np.asarray(longitude)
+    latitude = np.asarray(latitude)
+
+    phi = np.deg2rad(longitude)
+    theta = np.deg2rad(90 - latitude)
+
+    x = np.sin(theta) * np.cos(phi)
+    y = np.sin(theta) * np.sin(phi)
+    z = np.cos(theta)
+
+    return x, y, z
+
+
 class SeaIceV6():
     """
     NOAA/NSIDC version 6 sea ice data class.
@@ -67,6 +85,9 @@ class SeaIceV6():
 
         self._nc_files = nc_files
 
+        # TODO: cleanup the code below
+        # consider abstracting reading individual files into separate method
+        # also break lines of list defs for readability
         date = []
         seaice_conc, seaice_conc_stdev = [], []
         flag_missing, flag_land, flag_coast, flag_lake, flag_hole = [], [], [], [], []
