@@ -69,7 +69,7 @@ class LocallyConnected2d(nn.Module):
         self.weight = nn.Parameter(torch.ones(out_channels, *self.out_spatial_size, self._block_size) / self._block_size)
         self.bias = nn.Parameter(torch.randn(out_channels, *self.out_spatial_size))
 
-    def forward(self, x: torch.tensor):
+    def forward(self, x: torch.Tensor):
         """
         Note: Currently, only 4-D input tensors (batched image-like tensors) are supported,
         as per `nn.Unfold` and `nn.functional.unfold`.  This method will add a degenerate axis
