@@ -9,8 +9,9 @@ import netCDF4
 import numpy as np
 import numpy.typing as npt
 
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 
 
@@ -32,7 +33,8 @@ def lonlat2cartesian(longitude, latitude):
     return x, y, z
 
 
-class SeaIceV6():
+@dataclass(eq=False, repr=False)
+class SeaIceV6:
     """
     NOAA/NSIDC version 6 sea ice data class.
 
@@ -43,47 +45,48 @@ class SeaIceV6():
     Attributes:
         date:                        Array of dates.
     
-        seaice_conc:                 Array of fractional sea ice concentration values like (time x ygrid x xgrid)  Values range [0., 1.].
-        seaice_conc_stdev:           Array of sea ice concentration stdev values like (time x ygrid x xgrid).  Values range [0., 1.].
+        seaice_conc:                 Array of shape (time, y, x) of fractional sea ice concentration values.  Values range [0., 1.].
+        seaice_conc_stdev:           Array of shape (time, y, x) of sea ice concentration stdev values.  Values range [0., 1.].
 
-        flag_missing:                Boolean array of missing data flags like (time x ygrid x xgrid).
-        flag_land:                   Boolean array of land (land not adjacent to ocean) like (time x ygrid x xgrid).
-        flag_coast:                  Boolean array of coast (land adjacent to ocean) flags like (time x ygrid x xgrid).
-        flag_lake:                   Boolean array of lake data flags like (time x ygrid x xgrid).
-        flag_hole:                   Boolean array of imaging hole flags like (time x ygrid x xgrid).
+        flag_missing:                Boolean array of shape (time, y, x) of missing data flags.
+        flag_land:                   Boolean array of shape (time, y, x) of land (land not adjacent to ocean).
+        flag_coast:                  Boolean array of shape (time, y, x) of coast (land adjacent to ocean) flags.
+        flag_lake:                   Boolean array of shape (time, y, x) of lake data flags.
+        flag_hole:                   Boolean array of shape (time, y, x) of imaging hole flags.
 
-        latitude:                    Array of latitude coordinates as degrees north like (ygrid x xgrid).
-        longitude:                   Array of longitude coordinates as degrees east like (ygrid x xgrid).
-        x:                           Array of x-offsets in meters of the center of each cell from the projection center like (xgrid).
-        y:                           Array of y-offsets in meters of the center of each cell from the projection center like (ygrid).
+        latitude:                    Array of shape (y, x) of latitude coordinates as degrees north.
+        longitude:                   Array of shape (y, x) of longitude coordinates as degrees east.
+        x:                           Array of shape (y, x) of x-offsets in meters of the center of each cell from the projection center.
+        y:                           Array of shape (y, x) of y-offsets in meters of the center of each cell from the projection center.
     """
-    date: npt.NDArray[np.datetime64]
+    nc_files: InitVar[Sequence[str | Path]]
 
-    seaice_conc: npt.NDArray[np.float64]
-    seaice_conc_stdev: npt.NDArray[np.float64]
+    date: npt.NDArray[np.datetime64] = field(init=False)
 
-    flag_missing: npt.NDArray[np.bool]
-    flag_land: npt.NDArray[np.bool]
-    flag_coast: npt.NDArray[np.bool]
-    flag_lake: npt.NDArray[np.bool]
-    flag_hole: npt.NDArray[np.bool]
+    seaice_conc: npt.NDArray[np.float64] = field(init=False)
+    seaice_conc_stdev: npt.NDArray[np.float64] = field(init=False)
 
-    latitude: npt.NDArray[np.float64]
-    longitude: npt.NDArray[np.float64]
+    flag_missing: npt.NDArray[np.bool_] = field(init=False)
+    flag_land: npt.NDArray[np.bool_] = field(init=False)
+    flag_coast: npt.NDArray[np.bool_] = field(init=False)
+    flag_lake: npt.NDArray[np.bool_] = field(init=False)
+    flag_hole: npt.NDArray[np.bool_] = field(init=False)
 
-    x: npt.NDArray[np.float64]
-    y: npt.NDArray[np.float64]
+    latitude: npt.NDArray[np.float64] = field(init=False)
+    longitude: npt.NDArray[np.float64] = field(init=False)
 
-    def __init__(self, nc_files: List[str] | List[Path]) -> None:
+    x: npt.NDArray[np.float64] = field(init=False)
+    y: npt.NDArray[np.float64] = field(init=False)
+
+    def __post_init__(self, nc_files: Sequence[str | Path]) -> None:
         """
         Initialize sea ice data in NOAA/NSIDC version 6 format.
 
         Args:
             nc_files (list of str or list of pathlib.Path):     .nc file to be opened
         """
-        if len(nc_files) < 1: raise ValueError('Received an empty list of files!')
-
-        self._nc_files = nc_files
+        if len(nc_files) < 1:
+            raise ValueError('Received an empty list of files!')
 
         # TODO: cleanup the code below
         # consider abstracting reading individual files into separate method
@@ -93,11 +96,11 @@ class SeaIceV6():
         flag_missing, flag_land, flag_coast, flag_lake, flag_hole = [], [], [], [], []
         latitude, longitude = [], []
         x, y = [], []
-        for f in self._nc_files:
+        for f in nc_files:
             with netCDF4.Dataset(f) as d:
                 date.append(np.array(d.variables['time']).astype('datetime64[D]'))
 
-                s = np.array(d['cdr_seaice_conc'])
+                s = np.asarray(d['cdr_seaice_conc'])
                 flag_missing.append(s == 255)  # get flags
                 flag_land.append(s == 254)
                 flag_coast.append(s == 253)
@@ -106,15 +109,15 @@ class SeaIceV6():
                 s[s >= 251] = np.nan  # mask out flags
                 seaice_conc.append(s)
 
-                s = np.array(d['cdr_seaice_conc_stdev'])
+                s = np.asarray(d['cdr_seaice_conc_stdev'])
                 s[s == -1] = np.nan  # mask out missing data
                 seaice_conc_stdev.append(s)
 
                 # handle everything else
-                latitude.append(np.array(d['cdr_supplementary/latitude']))
-                longitude.append(np.array(d['cdr_supplementary/longitude']))
-                x.append(np.array(d['x']))
-                y.append(np.array(d['y']))
+                latitude.append(np.asarray(d['cdr_supplementary/latitude']))
+                longitude.append(np.asarray(d['cdr_supplementary/longitude']))
+                x.append(np.asarray(d['x']))
+                y.append(np.asarray(d['y']))
 
         # check if all the grids match up
         for i in range(1, len(latitude)):
@@ -144,10 +147,10 @@ class SeaIceV6():
 
 def check_boundaries(indices: List[int] | Tuple[int] | npt.NDArray[np.intp], d: SeaIceV6) -> None:
     """
-    Verify that boundaries at each index in `indices` are the same (constant,) and fails if not.
+    Verify that boundaries at each index in `indices` are the same (i.e., boundaries are constant) and fails if not.
 
     Args:
-        indices:        List or tuple of indices to check, (you probably want these to be adjacent.)
+        indices:        List or tuple of indices to check, (you probably want these to be adjacent).
         d:              Sea ice data object.
     """ 
     indices = list(indices)   
