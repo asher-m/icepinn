@@ -223,10 +223,10 @@ class SeaiceAdr(nn.Module):
         """Infer a solution at the given collocation points, accepting numpy arrays as inputs.
 
         Arguments:
-            xd:
-                1-D array of x coordinates of collocation points at which to evaluate the solution.
-            yd:
-                1-D array of y coordiantes of collocation points at which to evaluate the solution.
+            x:
+                1-d array of x coordinates of collocation points at which to evaluate the solution.
+            y:
+                1-d array of y coordiantes of collocation points at which to evaluate the solution.
             batch_size:
                 Number of collocation points to evaluate simultaneously; choose this to be as large as your GPU's memory will allow.
                 
@@ -246,10 +246,10 @@ class SeaiceAdr(nn.Module):
         """Infer a solution at the given collocation points, accepting torch tensors as inputs.
 
         Arguments:
-            xd:
-                1-D array of x coordinates of collocation points at which to evaluate the solution.
-            yd:
-                1-D array of y coordiantes of collocation points at which to evaluate the solution.
+            x:
+                1-d array of x coordinates of collocation points at which to evaluate the solution.
+            y:
+                1-d array of y coordiantes of collocation points at which to evaluate the solution.
             batch_size:
                 Number of collocation points to evaluate simultaneously; choose this to be as large as your GPU's memory will allow.
                 
@@ -318,11 +318,11 @@ class SeaiceAdr(nn.Module):
 
         Arguments:
             data:
-                Solution data of each cell at t_{n} and t_{n+1}.  Must be of shape (2, N, M).
-            x_range:
-                The x coordinate range as a 1-D array of length N.
-            y_range:
-                The y coordinate range as a 1-D array of length M.
+                Solution data of each cell.  Must be of shape (S, N, M).
+            x:
+                The x coordinate range as a 1-d array of length N.
+            y:
+                The y coordinate range as a 1-d array of length M.
             mask_interior:
                 Mask of the interior of the domain in which the PDE will be enforced (and interior loss terms.)  Must be of shape (N, M).
             mask_perimeter:
@@ -369,10 +369,10 @@ class SeaiceAdr(nn.Module):
         Arguments:
             data:
                 Solution data of each cell at t_{n} and t_{n+1}.  Must be of shape (2, N, M).
-            x_range:
-                The x coordinate range as a 1-D array of length N.
-            y_range:
-                The y coordinate range as a 1-D array of length M.
+            x:
+                The x coordinate range as a 1-d array of length N.
+            y:
+                The y coordinate range as a 1-d array of length M.
             mask_interior:
                 Mask of the interior of the domain in which the PDE will be enforced (and interior loss terms.)  Must be of shape (N, M).
             mask_perimeter:
@@ -483,8 +483,8 @@ class DiscConvPinn(SeaiceAdr):
         Arguments:
             q:                  Number of stages q used in RK scheme to compute loss.  See Raissi 2019.
             Nt:                 Number of solution maps (i.e., in time) included in buffer.  The network is conditioned on these known solutions.
-            x_range:            The x coordinate range as a 1-D array.
-            y_range:            The y coordinate range as a 1-D array.
+            x_range:            The x coordinate range as a 1-d array.
+            y_range:            The y coordinate range as a 1-d array.
             kernel_xy:          Size of kernel over which to convolve.
             kernel_stack:       Number of neurons in the FC stack per output channel.
         Nt must be the same for every batch, data for which must be loaded through `Network.load_data`.
@@ -579,8 +579,8 @@ class DiscConvPinn(SeaiceAdr):
         Push data through the network for training.
 
         Arguments:
-            x:          1-D tensor of x-values at which to evaluate the solution of length batch size.
-            y:          1-D tensor of y-values at which to evaluate the solution of length batch size.
+            x:          1-d tensor of x-values at which to evaluate the solution of length batch size.
+            y:          1-d tensor of y-values at which to evaluate the solution of length batch size.
             batch_num:  Index of self.data to use.  Only used when x and y are scalars.
 
         Returns a tensor on `DEVICE`.

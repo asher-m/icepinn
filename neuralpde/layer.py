@@ -28,8 +28,9 @@ class LocallyConnected2d(nn.Module):
         for a more thorough description of these parameters and how they work.  In particular, I've tried
         to reuse the notational convention described in that documentation here.
 
-        Note: Currently, only 4-D input tensors (batched image-like tensors) are supported,
-        as per `nn.Unfold` and `nn.functional.unfold`.
+        .. warning::
+            Currently, only 4-d input tensors (batched image-like tensors) are supported,
+            as per `nn.Unfold` and `nn.functional.unfold`.
 
         Args:
             in_channels         : Number of channels in the input image (e.g., 3 for RGB).
@@ -71,9 +72,10 @@ class LocallyConnected2d(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """
-        Note: Currently, only 4-D input tensors (batched image-like tensors) are supported,
-        as per `nn.Unfold` and `nn.functional.unfold`.  This method will add a degenerate axis
-        at position 0 if it receives a tensor of ndim = 3, otherwise it will throw an error.
+        .. warning::
+            Currently, only 4-d input tensors (batched image-like tensors) are supported,
+            as per `nn.Unfold` and `nn.functional.unfold`.  This method will add a degenerate axis
+            at position 0 if it receives a tensor of ndim = 3, otherwise it will throw an error.
 
         Args:
             x (Tensor): Input tensor with shape (batch_size, in_channels, *self.in_spatial_shape)
@@ -100,8 +102,8 @@ class LocallyConnected2d(nn.Module):
 
         else:
             raise NotImplementedError(
-                'Only 4-D (batched image-like tensors) or 3-D tensors (unbatched image-like tensors) are supported!\n'
-                'nn.Unfold and nn.functional.unfold only support 4-D tensors.'
+                'Only 4-d (batched image-like tensors) or 3-d tensors (unbatched image-like tensors) are supported!\n'
+                'nn.Unfold and nn.functional.unfold only support 4-d tensors.'
             )
 
 
@@ -115,7 +117,7 @@ class GaussianDistanceWeight(nn.Module):
         an array of weights.
 
         Args:
-            coordinates:        Tuple of 1-D tensors of coordinate ranges.  Coordinate ranges are usually
+            coordinates:        Tuple of 1-d tensors of coordinate ranges.  Coordinate ranges are usually
                                 monotonic, but I don't check and I don't think it will break anything.
 
         Every tuple in *coordinates should have the same number of coordinate ranges (i.e., the same spatial dimension,)
