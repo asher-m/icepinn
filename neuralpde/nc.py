@@ -42,22 +42,27 @@ class SeaIceV6:
     concentraton files.  See [this link](https://nsidc.org/data/g02202/versions/6)
     for more information.
 
+    .. note::
+        These data are on a polar stereographic grid according to the NSIDC Sea Ice Polar Stereographic Grid definition.
+
+        See [this link](https://nsidc.org/data/polar-stereo/ps_grids.html) for more information.
+
     Attributes:
         date:                        Array of dates.
     
-        seaice_conc:                 Array of shape (time, y, x) of fractional sea ice concentration values.  Values range [0., 1.].
-        seaice_conc_stdev:           Array of shape (time, y, x) of sea ice concentration stdev values.  Values range [0., 1.].
+        seaice_conc:                 Array of shape (time, x, y) of fractional sea ice concentration values.  Values range [0., 1.].
+        seaice_conc_stdev:           Array of shape (time, x, y) of sea ice concentration stdev values.  Values range [0., 1.].
 
-        flag_missing:                Boolean array of shape (time, y, x) of missing data flags.
-        flag_land:                   Boolean array of shape (time, y, x) of land (land not adjacent to ocean).
-        flag_coast:                  Boolean array of shape (time, y, x) of coast (land adjacent to ocean) flags.
-        flag_lake:                   Boolean array of shape (time, y, x) of lake data flags.
-        flag_hole:                   Boolean array of shape (time, y, x) of imaging hole flags.
+        flag_missing:                Boolean array of shape (time, x, y) of missing data flags.
+        flag_land:                   Boolean array of shape (time, x, y) of land (land not adjacent to ocean).
+        flag_coast:                  Boolean array of shape (time, x, y) of coast (land adjacent to ocean) flags.
+        flag_lake:                   Boolean array of shape (time, x, y) of lake data flags.
+        flag_hole:                   Boolean array of shape (time, x, y) of imaging hole flags.
 
-        latitude:                    Array of shape (y, x) of latitude coordinates as degrees north.
-        longitude:                   Array of shape (y, x) of longitude coordinates as degrees east.
-        x:                           Array of shape (y, x) of x-offsets in meters of the center of each cell from the projection center.
-        y:                           Array of shape (y, x) of y-offsets in meters of the center of each cell from the projection center.
+        latitude:                    Array of shape (x, y) of latitude coordinates as degrees north.
+        longitude:                   Array of shape (x, y) of longitude coordinates as degrees east.
+        x:                           Array of shape (x,) of x-offsets in meters of the center of each cell from the projection center.
+        y:                           Array of shape (y,) of y-offsets in meters of the center of each cell from the projection center.
     """
     nc_files: InitVar[Sequence[str | Path]]
 
@@ -130,7 +135,7 @@ class SeaIceV6:
         # assign attributes
         self.date = np.concatenate(date)
 
-        self.seaice_conc = np.concatenate(seaice_conc).transpose((0, 2, 1))
+        self.seaice_conc = np.concatenate(seaice_conc).transpose((0, 2, 1))  # transpose to (time, x, y) ordering
         self.seaice_conc_stdev = np.concatenate(seaice_conc_stdev).transpose((0, 2, 1))
 
         self.flag_missing = np.concatenate(flag_missing).transpose((0, 2, 1))
