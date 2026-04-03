@@ -1,13 +1,11 @@
-import math
 import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import warnings
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 from . import layer
 
@@ -20,7 +18,6 @@ else:
     DEVICE = 'cpu'
 DTYPE = torch.float32
 
-# can I think of DT as unitless, or do I need to consider its units more carefully?
 DT = 1
 
 
@@ -109,18 +106,161 @@ class SeaiceAdr(nn.Module):
         self.rk_a, self.rk_b, self.rk_c = map(nn.Buffer, get_rk_scheme(q))
         self.channels = 4 + q
 
-    def predict(self, xd: np.ndarray, yd: np.ndarray, batch_size: int = 100):
-        """Push data through the network for evaluation.
+    def _split_output_channels(
+            self,
+            outputs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split the output channels of the network into diffusivity, velocity_x, velocity_y, forcing, and stage values."""
+        diffusivity = outputs[..., 0]
+        velocity_x = outputs[..., 1]
+        velocity_y = outputs[..., 2]
+        forcing = outputs[..., 3]
+        stage_values = outputs[..., 4:]
+        return diffusivity, velocity_x, velocity_y, forcing, stage_values
+
+    def _compute_output_derivatives(
+            self,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            create_graph: bool,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute the output of the network and its first and second derivatives with respect to x and y at the given points."""
+        # TODO: Benchmark replacing these nested autograd.grad calls with torch.func.jacfwd/vmap.
+        # This network has only 2 differentiated inputs (x, y) but many output channels, so
+        # forward-mode AD may be faster for these first- and second-derivative calculations.
+        batch_size = len(x)
+        diff_outputs = torch.ones((batch_size, self.channels), device=DEVICE).requires_grad_(True)
+        diff_points = torch.ones((batch_size,), device=DEVICE).requires_grad_(True)
+
+        outputs = self.forward(x, y)
+        outputs_x, = torch.autograd.grad(
+            torch.autograd.grad(outputs, x, diff_outputs, create_graph=True),
+            diff_outputs,
+            diff_points,
+            create_graph=True,
+        )
+        outputs_xx, = torch.autograd.grad(
+            torch.autograd.grad(outputs_x, x, diff_outputs, create_graph=True),
+            diff_outputs,
+            diff_points,
+            create_graph=create_graph,
+            retain_graph=True,
+        )
+        outputs_y, = torch.autograd.grad(
+            torch.autograd.grad(outputs, y, diff_outputs, create_graph=True),
+            diff_outputs,
+            diff_points,
+            create_graph=True,
+        )
+        outputs_yy, = torch.autograd.grad(
+            torch.autograd.grad(outputs_y, y, diff_outputs, create_graph=True),
+            diff_outputs,
+            diff_points,
+            create_graph=False,
+            retain_graph=False,
+        )
+
+        return outputs, outputs_x, outputs_y, outputs_xx, outputs_yy
+
+    def _compute_pde_rhs(
+            self,
+            outputs: torch.Tensor,
+            outputs_x: torch.Tensor,
+            outputs_y: torch.Tensor,
+            outputs_xx: torch.Tensor,
+            outputs_yy: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the right-hand side of the PDE at the given points, using the outputs and their derivatives."""
+        diffusivity, velocity_x, velocity_y, forcing, stage_values = self._split_output_channels(outputs)
+        diffusivity_x, velocity_x_x, _, _, stage_values_x = self._split_output_channels(outputs_x)
+        diffusivity_y, _, velocity_y_y, _, stage_values_y = self._split_output_channels(outputs_y)
+        _, _, _, _, stage_values_xx = self._split_output_channels(outputs_xx)
+        _, _, _, _, stage_values_yy = self._split_output_channels(outputs_yy)
+
+        return (
+            diffusivity.unsqueeze(-1) * (stage_values_xx + stage_values_yy)
+            + (diffusivity_x.unsqueeze(-1) * stage_values_x + diffusivity_y.unsqueeze(-1) * stage_values_y)
+            - (velocity_x_x.unsqueeze(-1) + velocity_y_y.unsqueeze(-1)) * stage_values
+            - (velocity_x.unsqueeze(-1) * stage_values_x + velocity_y.unsqueeze(-1) * stage_values_y)
+            + forcing.unsqueeze(-1)
+        )
+
+    def _reconstruct_endpoint_estimates(
+            self,
+            stage_values: torch.Tensor,
+            pde_rhs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Reconstruct estimates of the solution at the initial and final time steps from the stage values and PDE right-hand side."""
+        u_hat_initial = stage_values - DT * torch.einsum('ij,bj->bi', self.rk_a, pde_rhs)
+        u_hat_final = stage_values - DT * torch.einsum('ij,bj->bi', self.rk_a - self.rk_b.unsqueeze(0), pde_rhs)
+        return u_hat_initial, u_hat_final
+
+    def _get_training_batch(
+            self,
+            data: torch.Tensor,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            mask_interior: torch.Tensor,
+            mask_boundary: torch.Tensor,
+            mask: torch.Tensor,
+            batch_size: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_indices = torch.randint(0, mask.shape[-1], (batch_size,), device=DEVICE)
+        x_batch = x[mask[0, batch_indices]].requires_grad_(True)
+        y_batch = y[mask[1, batch_indices]].requires_grad_(True)
+        u_initial_batch = data[0, mask[0, batch_indices], mask[1, batch_indices]]
+        u_final_batch = data[1, mask[0, batch_indices], mask[1, batch_indices]]
+        interior_mask_batch = mask_interior[mask[0, batch_indices], mask[1, batch_indices]]
+        boundary_mask_batch = mask_boundary[mask[0, batch_indices], mask[1, batch_indices]]
+        return x_batch, y_batch, u_initial_batch, u_final_batch, interior_mask_batch, boundary_mask_batch
+
+    def predict(
+            self,
+            x: np.ndarray,
+            y: np.ndarray,
+            batch_size: int = 100
+        ) -> dict[str, np.ndarray]:
+        """Infer a solution at the given collocation points, accepting numpy arrays as inputs.
 
         Arguments:
-            xd (np.ndarray):
+            xd:
                 1-D array of x coordinates of collocation points at which to evaluate the solution.
-            yd (np.ndarray):
+            yd:
                 1-D array of y coordiantes of collocation points at which to evaluate the solution.
-            batch_size (int):
+            batch_size:
                 Number of collocation points to evaluate simultaneously; choose this to be as large as your GPU's memory will allow.
+                
         """
+        return self._predict(
+            np2torch(x),
+            np2torch(y),
+            batch_size
+        )
+
+    def _predict(
+            self,
+            x: torch.Tensor,
+            y: torch.Tensor,
+            batch_size: int
+        ):
+        """Infer a solution at the given collocation points, accepting torch tensors as inputs.
+
+        Arguments:
+            xd:
+                1-D array of x coordinates of collocation points at which to evaluate the solution.
+            yd:
+                1-D array of y coordiantes of collocation points at which to evaluate the solution.
+            batch_size:
+                Number of collocation points to evaluate simultaneously; choose this to be as large as your GPU's memory will allow.
+                
+        """
+        # TODO: Consider removing y as separate coordinate array; make x of shape (N, d)
+        # where N number of points to evaluate and d spatial dimension of domain.
+        # This change should mirror similar changes in associated methods.
+        # This would complicate assumptions about the dimension/shape of convolutional kernels,
+        # but would make the code generalizable to higher-dimensional problems and more consistent across methods.
         self.eval()
+        num_x, num_y = len(x), len(y)
 
         results = {
             'k': list(),
@@ -131,171 +271,198 @@ class SeaiceAdr(nn.Module):
             'uhat_f': list(),
         }
 
-        indices = np2torch(np.indices((len(xd), len(yd))).reshape((2, -1)), dtype=torch.int)
+        indices = np2torch(np.indices((num_x, num_y)).reshape((2, -1)), dtype=torch.int)
 
-        # TODO: remove y as seperate coordinate array
-        # make x of shape (N, d), where N number of points to evaluate and d spatial dimension of domain
-        # same as changes to fit
-        x = np2torch(xd).requires_grad_(True)
-        y = np2torch(yd).requires_grad_(True)
+        for batch_start in range(0, indices.shape[-1], batch_size):
+            batch_stop = batch_start + batch_size
+            x_batch = x[indices[0, batch_start:batch_stop]]
+            y_batch = y[indices[1, batch_start:batch_stop]]
 
-        for i in range(math.ceil(indices.shape[-1] / batch_size)):
-            x = x[indices[0, i * batch_size:(i + 1) * batch_size]]
-            y = y[indices[1, i * batch_size:(i + 1) * batch_size]]
-
-            diff_r = torch.ones((len(x), self.channels), device=DEVICE).requires_grad_(True)
-            diff_p = torch.ones((len(x)), device=DEVICE).requires_grad_(True)
-
-            r = self.forward(x, y)
-            r_x, = torch.autograd.grad(torch.autograd.grad(r, x, diff_r, create_graph=True), diff_r, diff_p, create_graph=True)
-            r_xx, = torch.autograd.grad(torch.autograd.grad(r_x, x, diff_r, create_graph=True), diff_r, diff_p, retain_graph=True)
-            r_y, = torch.autograd.grad(torch.autograd.grad(r, y, diff_r, create_graph=True), diff_r, diff_p, create_graph=True)
-            r_yy, = torch.autograd.grad(torch.autograd.grad(r_y, y, diff_r, create_graph=True), diff_r, diff_p, retain_graph=False)
-
-            k, v1, v2, f, urk = r[..., 0], r[..., 1], r[..., 2], r[..., 3], r[..., 4:]
-            k_x, v1_x, v2_x, urk_x = r_x[..., 0], r_x[..., 1], r_x[..., 2], r_x[..., 4:]
-            k_y, v1_y, v2_y, urk_y = r_y[..., 0], r_y[..., 1], r_y[..., 2], r_y[..., 4:]
-            urk_xx = r_xx[..., 4:]
-            urk_yy = r_yy[..., 4:]
-
-            pde = (  # not particularly pythonic, but easier to read
-                k.unsqueeze(-1) * (urk_xx + urk_yy) + (k_x.unsqueeze(-1) * urk_x + k_y.unsqueeze(-1) * urk_y)
-                - (v1_x.unsqueeze(-1) + v2_y.unsqueeze(-1)) * urk - (v1.unsqueeze(-1) * urk_x + v2.unsqueeze(-1) * urk_y)
-                + f.unsqueeze(-1)
+            outputs, outputs_x, outputs_y, outputs_xx, outputs_yy = self._compute_output_derivatives(
+                x_batch,
+                y_batch,
+                create_graph=False,
             )
+            diffusivity, velocity_x, velocity_y, forcing, stage_values = self._split_output_channels(outputs)
+            pde_rhs = self._compute_pde_rhs(outputs, outputs_x, outputs_y, outputs_xx, outputs_yy)
+            u_hat_initial, u_hat_final = self._reconstruct_endpoint_estimates(stage_values, pde_rhs)
 
-            uhat_i = urk - DT * torch.einsum('ij,bj->bi', self.rk_a, pde)
-            uhat_f = urk - DT * torch.einsum('ij,bj->bi', self.rk_a - self.rk_b.unsqueeze(0), pde)
+            results['k'].append(torch2np(diffusivity))
+            results['v1'].append(torch2np(velocity_x))
+            results['v2'].append(torch2np(velocity_y))
+            results['f'].append(torch2np(forcing))
+            results['uhat_i'].append(torch2np(u_hat_initial))
+            results['uhat_f'].append(torch2np(u_hat_final))
 
-            results['k'].append(torch2np(k))
-            results['v1'].append(torch2np(v1))
-            results['v2'].append(torch2np(v2))
-            results['f'].append(torch2np(f))
-            results['uhat_i'].append(torch2np(uhat_i))
-            results['uhat_f'].append(torch2np(uhat_f))
-
-        # TODO: fix linting error about overwriting values in results (expected to be lists)
         for key in ('k', 'v1', 'v2', 'f'):
-            results[key] = np.concatenate(results[key]).reshape((len(x), len(y)))
+            results[key] = np.concatenate(results[key]).reshape((num_x, num_y))
         for key in ('uhat_i', 'uhat_f'):
-            results[key] = np.concatenate(results[key]).reshape((len(x), len(y), self.q))
+            results[key] = np.concatenate(results[key]).reshape((num_x, num_y, self.q))
 
         return results
 
-
-    def fit(self,
-            u: npt.NDArray,
-            x_range: npt.NDArray,
-            y_range: npt.NDArray,
-            dmask_inte: npt.NDArray,
-            dmask_peri: npt.NDArray,
-            weights: npt.NDArray,
-            epochs: int = 1000,
-            lr: float = 1e-3,
-            batch_size: int = 100,
-            shuffle: int = 10):
-        """Train the PINN.
+    def fit(
+        self,
+        data: npt.NDArray,
+        x: npt.NDArray,
+        y: npt.NDArray,
+        mask_interior: npt.NDArray,
+        mask_perimeter: npt.NDArray,
+        weights: npt.NDArray,
+        epochs: int = 1000,
+        lr: float = 1e-3,
+        batch_size: int = 100,
+        shuffle: int = 10
+    ) -> list[float]:
+        """Train the PINN, accepting numpy arrays as inputs.
 
         Arguments:
-            u:              Solution data of each cell at t_{n} and t_{n+1}.  Must be of shape (2, N, M).
-            x_range:        The x coordinate range as a 1-D array of length N.
-            y_range:        The y coordinate range as a 1-D array of length M.
-            dmask_inte:     Mask of the interior of the domain in which the PDE will be enforced (and interior loss terms.)  Must be of shape (N, M).
-            dmask_peri:     Mask of the perimeter of the domain on which the boundary conditions will be enforced (and boundary loss terms.)  Must be of shape (N, M).
-            weights:        Weights of each term in the loss.  Must be of shape (6,) and ordered as (loss_u_i, loss_u_f, loss_bc, loss_k_reg, loss_v_reg, loss_f_min).
-            epochs:         Number of epochs to run.
-            lr:             Learning rate passed to Adam optimizer.
-            batch_size:     Number of solution points on which to simultaneously train.
-            shuffle:        Shuffle the set of solution points after this many epochs.
+            data:
+                Solution data of each cell at t_{n} and t_{n+1}.  Must be of shape (2, N, M).
+            x_range:
+                The x coordinate range as a 1-D array of length N.
+            y_range:
+                The y coordinate range as a 1-D array of length M.
+            mask_interior:
+                Mask of the interior of the domain in which the PDE will be enforced (and interior loss terms.)  Must be of shape (N, M).
+            mask_perimeter:
+                Mask of the perimeter of the domain on which the boundary conditions will be enforced (and boundary loss terms.)  Must be of shape (N, M).
+            weights:
+                Weights of each term in the loss.  Must be of shape (6,) and ordered as (loss_u_i, loss_u_f, loss_bc, loss_k_reg, loss_v_reg, loss_f_min).
+            epochs:
+                Number of epochs to run.
+            lr:
+                Learning rate passed to Adam optimizer.
+            batch_size:
+                Number of solution points on which to simultaneously train.
+            shuffle:
+                Shuffle the set of solution points after this many epochs.
         """
-        weights = np2torch(weights)
-        mask_inte, mask_peri = np2torch(dmask_inte, dtype=bool), np2torch(dmask_peri, dtype=bool)
+        return self._fit(
+            np2torch(data),
+            np2torch(x),
+            np2torch(y),
+            np2torch(mask_interior),
+            np2torch(mask_perimeter),
+            np2torch(weights),
+            epochs,
+            lr,
+            batch_size,
+            shuffle
+        )
+
+    def _fit(
+        self,
+        data: torch.Tensor,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask_interior: torch.Tensor,
+        mask_perimeter: torch.Tensor,
+        weights: torch.Tensor,
+        epochs: int,
+        lr: float,
+        batch_size: int,
+        shuffle: int
+    ):
+        """Train the PINN, accepting torch tensors as inputs.
+
+        Arguments:
+            data:
+                Solution data of each cell at t_{n} and t_{n+1}.  Must be of shape (2, N, M).
+            x_range:
+                The x coordinate range as a 1-D array of length N.
+            y_range:
+                The y coordinate range as a 1-D array of length M.
+            mask_interior:
+                Mask of the interior of the domain in which the PDE will be enforced (and interior loss terms.)  Must be of shape (N, M).
+            mask_perimeter:
+                Mask of the perimeter of the domain on which the boundary conditions will be enforced (and boundary loss terms.)  Must be of shape (N, M).
+            weights:
+                Weights of each term in the loss.  Must be of shape (6,) and ordered as (loss_u_i, loss_u_f, loss_bc, loss_k_reg, loss_v_reg, loss_f_min).
+            epochs:
+                Number of epochs to run.
+            lr:
+                Learning rate passed to Adam optimizer.
+            batch_size:
+                Number of solution points on which to simultaneously train.
+            shuffle:
+                Shuffle the set of solution points after this many epochs.
+        """
+        # TODO: Consider removing y as separate coordinate array; make x of shape (N, d)
+        # where N number of points to evaluate and d spatial dimension of domain.
+        # This change should mirror similar changes in associated methods.
+        # This would complicate assumptions about the dimension/shape of convolutional kernels,
+        # but would make the code generalizable to higher-dimensional problems and more consistent across methods.
         optimizer = optim.Adam(self.parameters(), lr=lr)
 
-        # cast ndarrays to tensors
-        u = np2torch(u)
-        # TODO: remove y as seperate coordinate array
-        # make x of shape (N, d), where N number of points to evaluate and d spatial dimension of domain
-        # same as changes to predict
-        x_range = np2torch(x_range)
-        y_range = np2torch(y_range)
-
-        # make indices
-        indices = (mask_inte | mask_peri).nonzero().T
-
-        # make right-hand vectors for Jacobian computation
-        diff_r = torch.ones((batch_size, self.channels), device=DEVICE).requires_grad_(True)
-        diff_p = torch.ones((batch_size), device=DEVICE).requires_grad_(True)
+        mask = (mask_interior | mask_perimeter).nonzero().T
 
         # do the training
         self.train()
         losses = list()
-        t = Path('training')  # training lockfile
-        t.touch()
-        e = 0
-        # TODO: this is pretty nasty; need to break down
-        while t.exists() and e < epochs + 1:
-            print(f'Starting epoch {e}...', end='\r')
+        training_lockfile = Path('training')
+        training_lockfile.touch()
+        epoch = 0
+        # TODO: Replace lockfile-based interruption with a more standard graceful stop
+        # mechanism such as KeyboardInterrupt/SIGINT handling plus checkpoint cleanup.
+        while training_lockfile.exists() and epoch < epochs + 1:
+            print(f'Starting epoch {epoch}...', end='\r')
 
             optimizer.zero_grad(set_to_none=True)
 
-            if e % shuffle == 0:  # shuffle the set of training points
-                idx = torch.randint(0, indices.shape[-1], (batch_size,), device=DEVICE)
-                x = x_range[indices[0, idx]].requires_grad_(True)
-                y = y_range[indices[1, idx]].requires_grad_(True)
-                u_i = u[0, indices[0, idx], indices[1, idx]]
-                u_f = u[1, indices[0, idx], indices[1, idx]]
-                mi = mask_inte[indices[0, idx], indices[1, idx]]
-                mb = mask_peri[indices[0, idx], indices[1, idx]]
+            if epoch % shuffle == 0:  # shuffle the set of training points
+                (
+                    x_batch,
+                    y_batch,
+                    u_initial_batch,
+                    u_final_batch,
+                    mask_interior_batch,
+                    mask_boundary_batch,
+                ) = self._get_training_batch(
+                    data,
+                    x,
+                    y,
+                    mask_interior,
+                    mask_perimeter,
+                    mask,
+                    batch_size,
+                )
 
-            r = self.forward(x, y)
-            r_x, = torch.autograd.grad(torch.autograd.grad(r, x, diff_r, create_graph=True), diff_r, diff_p, create_graph=True)
-            r_xx, = torch.autograd.grad(torch.autograd.grad(r_x, x, diff_r, create_graph=True), diff_r, diff_p, create_graph=True)
-            r_y, = torch.autograd.grad(torch.autograd.grad(r, y, diff_r, create_graph=True), diff_r, diff_p, create_graph=True)
-            r_yy, = torch.autograd.grad(torch.autograd.grad(r_y, y, diff_r, create_graph=True), diff_r, diff_p, create_graph=False)
-
-            k, v1, v2, f, urk = r[..., 0], r[..., 1], r[..., 2], r[..., 3], r[..., 4:]
-            k_x, v1_x, v2_x, urk_x = r_x[..., 0], r_x[..., 1], r_x[..., 2], r_x[..., 4:]
-            k_y, v1_y, v2_y, urk_y = r_y[..., 0], r_y[..., 1], r_y[..., 2], r_y[..., 4:]
-            urk_xx = r_xx[..., 4:]
-            urk_yy = r_yy[..., 4:]
-
-            pde = (  # not particularly pythonic, but easier to read
-                k.unsqueeze(-1) * (urk_xx + urk_yy) + (k_x.unsqueeze(-1) * urk_x + k_y.unsqueeze(-1) * urk_y)
-                - (v1_x.unsqueeze(-1) + v2_y.unsqueeze(-1)) * urk - (v1.unsqueeze(-1) * urk_x + v2.unsqueeze(-1) * urk_y)
-                + f.unsqueeze(-1)
+            outputs, outputs_x, outputs_y, outputs_xx, outputs_yy = self._compute_output_derivatives(
+                x_batch,
+                y_batch,
+                create_graph=True,
             )
+            diffusivity, velocity_x, velocity_y, forcing, stage_values = self._split_output_channels(outputs)
+            diffusivity_x, velocity_x_x, velocity_y_x, _, _ = self._split_output_channels(outputs_x)
+            diffusivity_y, velocity_x_y, velocity_y_y, _, _ = self._split_output_channels(outputs_y)
+            pde_rhs = self._compute_pde_rhs(outputs, outputs_x, outputs_y, outputs_xx, outputs_yy)
+            u_hat_initial, u_hat_final = self._reconstruct_endpoint_estimates(stage_values, pde_rhs)
 
-            uhat_i = urk - DT * torch.einsum('ij,bj->bi', self.rk_a, pde)
-            uhat_f = urk - DT * torch.einsum('ij,bj->bi', self.rk_a - self.rk_b.unsqueeze(0), pde)
+            loss_u_i = torch.sum(mask_interior_batch.unsqueeze(-1) * (u_hat_initial - u_initial_batch.unsqueeze(-1))**2)
+            loss_u_f = torch.sum(mask_interior_batch.unsqueeze(-1) * (u_hat_final - u_final_batch.unsqueeze(-1))**2)
 
-            # compute loss with estimate and actual solution
-            loss_u_i = torch.sum(mi.unsqueeze(-1) * (uhat_i - u_i.unsqueeze(-1))**2)
-            loss_u_f = torch.sum(mi.unsqueeze(-1) * (uhat_f - u_f.unsqueeze(-1))**2)
+            loss_bc = torch.sum(mask_boundary_batch * (velocity_x**2 + velocity_y**2)) + torch.sum(mask_boundary_batch * diffusivity**2)
+            loss_k_reg = torch.sum(mask_interior_batch * (diffusivity_x**2 + diffusivity_y**2)) + torch.sum(mask_interior_batch * diffusivity**2)
+            loss_v_reg = torch.sum(mask_interior_batch * (velocity_x_x**2 + velocity_x_y**2 + velocity_y_x**2 + velocity_y_y**2))
+            loss_f_min = torch.sum(mask_interior_batch * (forcing**2))
 
-            # compute other loss terms
-            loss_bc = torch.sum(mb * (v1**2 + v2**2)) + torch.sum(mb * k**2)
-            loss_k_reg = torch.sum(mi * (k_x**2 + k_y**2)) + torch.sum(mi * k**2)
-            loss_v_reg = torch.sum(mi * (v1_x**2 + v1_y**2 + v2_x**2 + v2_y**2))
-            loss_f_min = torch.sum(mi * (f**2))
-
-            # compute net loss
             loss = torch.stack((loss_u_i, loss_u_f, loss_bc, loss_k_reg, loss_v_reg, loss_f_min)) @ weights
 
             loss.backward()
             optimizer.step()
 
             losses.append(loss.item())
-            if e % 10 == 0:
+            if epoch % 10 == 0:
                 print(
-                    f'Epoch {e:5d} of {epochs:5d}, loss {losses[-1]:10.2f}' +
-                    (f', relative improvement {100 * (1 - losses[-1] / losses[-11]):10.2f}%' if e > 0 else '')
+                    f'Epoch {epoch:5d} of {epochs:5d}, loss {losses[-1]:10.2f}' +
+                    (f', relative improvement {100 * (1 - losses[-1] / losses[-11]):10.2f}%' if epoch > 0 else '')
                 )
 
-            del r, r_x, r_y, r_xx, r_yy
-            e += 1
+            del outputs, outputs_x, outputs_y, outputs_xx, outputs_yy
+            epoch += 1
 
-        t.unlink(missing_ok=True)  # remove lockfile
+        training_lockfile.unlink(missing_ok=True)
 
         return losses
 
