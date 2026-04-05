@@ -300,8 +300,6 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         C index increments upwards for latter times.
         """
-        self.train()
-
         b, c, n, m = data.shape
         if c != 3:
             raise ValueError(f'Expected C = 3 timesteps, got {c}!')
@@ -309,13 +307,12 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
             raise ValueError(f'Expected number of x values, y values (N, M) = (13, 13), got {(n, m)}!')
         
         if label.shape != (b,):
-            raise ValueError(f'Expected labels of shape (B,) = ({b},)W, got {label.shape}!')
+            raise ValueError(f'Expected labels of shape (B,) = ({b},), got {label.shape}!')
 
         patches = nn.functional.unfold(data, 11).reshape(b, 3, 11, 11, 9)
-        outputs = torch.zeros((b, 3, 3, 5))
-        for k in range(9):
-            i, j = k // 3, k % 3
-            outputs[:, i, j] = self.forward(patches[..., k])
+        patches = patches.permute(0, 4, 1, 2, 3).reshape(b * 9, 3, 11, 11)
+        outputs = self.forward(patches).reshape(b, 3, 3, 5)
+
         loss = self._compute_loss(data, label, outputs)
 
         return loss

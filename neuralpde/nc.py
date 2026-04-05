@@ -6,14 +6,16 @@ datafiles.
 
 import datetime
 import netCDF4
+import gzip
 import numpy as np
 import numpy.typing as npt
+import pathlib
 import scipy.interpolate as interpolate
+import tqdm
+
 
 from dataclasses import InitVar, dataclass, field
-from pathlib import Path
-from typing import List, Sequence, Tuple
-
+from typing import Sequence
 
 
 def date2datetime64(dt: datetime.date) -> np.datetime64:
@@ -65,7 +67,7 @@ class SeaIceV6:
         x:                           Array of shape (x,) of x-offsets in meters of the center of each cell from the projection center.
         y:                           Array of shape (y,) of y-offsets in meters of the center of each cell from the projection center.
     """
-    nc_files: InitVar[Sequence[str | Path]]
+    nc_files: InitVar[Sequence[str | pathlib.Path]]
     fill_nan: InitVar[bool] = False
 
     date: npt.NDArray[np.datetime64] = field(init=False)
@@ -85,12 +87,12 @@ class SeaIceV6:
     x: npt.NDArray[np.float64] = field(init=False)
     y: npt.NDArray[np.float64] = field(init=False)
 
-    def __post_init__(self, nc_files: Sequence[str | Path], fill_nan: bool) -> None:
+    def __post_init__(self, nc_files: Sequence[str | pathlib.Path], fill_nan: bool) -> None:
         """
         Initialize sea ice data in NOAA/NSIDC version 6 format.
 
         Arguments:
-            nc_files (list of str or list of pathlib.Path):
+            nc_files (list of str or list of pathlib.pathlib.Path):
                 List of .nc files to be opened.
             fill_nan (bool):
                 Fill NaN values with a nearest non-nan value.  Does not affect flags.  Default is False.
@@ -172,7 +174,7 @@ class SeaIceV6:
                 )(np.stack(np.meshgrid(self.y, self.x), axis=-1)[mask].reshape(-1, 2))
 
 
-def check_boundaries(indices: List[int] | Tuple[int] | npt.NDArray[np.intp], d: SeaIceV6) -> None:
+def check_boundaries(indices: list[int] | tuple[int] | npt.NDArray[np.intp], d: SeaIceV6) -> None:
     """
     Verify that boundaries at each index in `indices` are the same (i.e., boundaries are constant) and fails if not.
 
@@ -187,3 +189,30 @@ def check_boundaries(indices: List[int] | Tuple[int] | npt.NDArray[np.intp], d: 
         not np.all(d.flag_lake[indices[0]] == d.flag_lake[indices]) or \
         not np.all(d.flag_hole[indices[0]] == d.flag_hole[indices]):
         raise ValueError('Found inconsistent boundaries in data!')
+
+
+def extract_nc(nc_files: list[str | pathlib.Path]):
+    if len(nc_files) < 1:
+        raise ValueError('Must pass at least 1 .nc file!')
+    
+    dates = []
+    savedir = pathlib.Path(nc_files[0]).parent
+    for f in nc_files:
+        print(f'Working on {pathlib.Path(f).name}...')
+        d = SeaIceV6([f])
+        dates.append(d.date)
+
+        for i, dd in tqdm.tqdm(enumerate(d.date)):
+            with gzip.open(savedir / (str(dd) + '_seaice_conc.npy.gz'), 'wb') as f:
+                np.save(f, d.seaice_conc[i])
+            with gzip.open(savedir / (str(dd) + '_seaice_conc_stdev.npy.gz'), 'wb') as f:
+                np.save(f, d.seaice_conc_stdev[i])
+
+    d = SeaIceV6([nc_files[0]])
+    np.save(savedir / 'd.npy', np.concat(dates))
+    np.save(savedir / 'x.npy', d.x)
+    np.save(savedir / 'y.npy', d.y)
+
+
+def load_nc(npy_gz: str | pathlib.Path):
+    pass
