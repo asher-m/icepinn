@@ -9,12 +9,6 @@ from pathlib import Path
 from . import layer
 
 
-if torch.cuda.is_available():
-    DEVICE = 'cuda'
-elif torch.xpu.is_available():
-    DEVICE = 'xpu'
-else:
-    DEVICE = 'cpu'
 DTYPE = torch.float32
 
 
@@ -48,7 +42,7 @@ def np2torch(d: npt.NDArray, dtype: torch.dtype = DTYPE) -> torch.Tensor:
         dtype (torch.dtype):
             Datatype to which to cast the array.  Default is DTYPE (torch.float32 unless overridden).
     """
-    return torch.from_numpy(d).to(DEVICE, dtype)
+    return torch.from_numpy(d).to(dtype)
 
 
 def torch2np(d: torch.Tensor) -> np.ndarray:
@@ -102,12 +96,12 @@ class AdrNondim:
         """
         super().__init__()
 
-        self.u0 = nn.Buffer(torch.tensor(u0, dtype=DTYPE, device=DEVICE))
-        self.L0 = nn.Buffer(torch.tensor(L0, dtype=DTYPE, device=DEVICE))
-        self.t0 = nn.Buffer(torch.tensor(t0, dtype=DTYPE, device=DEVICE))
-        self.k0 = nn.Buffer(torch.tensor(k0, dtype=DTYPE, device=DEVICE))
-        self.v0 = nn.Buffer(torch.tensor(v0, dtype=DTYPE, device=DEVICE))
-        self.f0 = nn.Buffer(torch.tensor(f0, dtype=DTYPE, device=DEVICE))
+        self.u0 = nn.Buffer(torch.tensor(u0, dtype=DTYPE))
+        self.L0 = nn.Buffer(torch.tensor(L0, dtype=DTYPE))
+        self.t0 = nn.Buffer(torch.tensor(t0, dtype=DTYPE))
+        self.k0 = nn.Buffer(torch.tensor(k0, dtype=DTYPE))
+        self.v0 = nn.Buffer(torch.tensor(v0, dtype=DTYPE))
+        self.f0 = nn.Buffer(torch.tensor(f0, dtype=DTYPE))
 
 
 class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
@@ -163,14 +157,13 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
         """
         super().__init__(u0, L0, t0, k0, v0, f0)
 
-        self.s = nn.Buffer(torch.tensor(s, dtype=DTYPE, device=DEVICE))
-        self.h = nn.Buffer(torch.tensor(h, dtype=DTYPE, device=DEVICE))
+        self.s = nn.Buffer(torch.tensor(s, dtype=DTYPE))
+        self.h = nn.Buffer(torch.tensor(h, dtype=DTYPE))
 
         self.loss_weights = nn.Buffer(
             torch.tensor(
                 [0.5, 0.5],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
 
@@ -182,8 +175,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0.12210311, 0.33191066, 0.12210311],
                     [0.04491922, 0.12210311, 0.04491922]
                 ],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
         self.k_x = nn.Buffer(
@@ -193,8 +185,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0.,  0., 0.],
                     [0.,  1., 0.]
                 ],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
         self.k_y = nn.Buffer(
@@ -204,8 +195,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [-1., 0., 1.],
                     [ 0., 0., 0.]
                 ],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
         self.k_xx = nn.Buffer(
@@ -215,8 +205,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0., -2., 0.],
                     [0.,  1., 0.]
                 ],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
         self.k_yy = nn.Buffer(
@@ -226,13 +215,12 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [1., -2., 1.],
                     [0.,  0., 0.]
                 ],
-                dtype=DTYPE,
-                device=DEVICE
+                dtype=DTYPE
             )
         )
 
-        self.mix_a = nn.Parameter(torch.normal(0, 1, (128, 5 * 3 * 81)))  # 128 output size
-        self.mix_b = nn.Parameter(torch.normal(0, 1, (128,)))
+        self.mix_a = nn.Parameter(torch.normal(0, 1, (128, 5 * 3 * 81), dtype=DTYPE))  # 128 output size
+        self.mix_b = nn.Parameter(torch.normal(0, 1, (128,), dtype=DTYPE))
 
         self.mlp = nn.Sequential(
             nn.Tanh(),
@@ -314,15 +302,18 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         return output
 
-    def _fit(
+    def fit(
         self,
-        data: torch.Tensor,
-        label: torch.Tensor
+        data: npt.NDArray,
+        label: npt.NDArray
     ):
         """
-        Perform one regression step based on input data.
+        Compute fit of network to data.
 
-        Accepts torch tensors as inputs.
+        Accepts numpy arrays as inputs.
+
+        .. note::
+            You probably don't want this unless you know (for sure) what you're doing.
 
         Arguments:
             s:          0-d tensor of time delta (i.e., :math:`dt`).
@@ -337,22 +328,53 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         C index increments upwards for latter times.
         """
+        return torch2np(
+            self._fit(
+                np2torch(data),
+                np2torch(label)
+            )
+        )
+
+    def _fit(
+        self,
+        data: torch.Tensor,
+        label: torch.Tensor
+    ):
+        """
+        Compute fit of network to data.
+
+        Accepts torch tensors as inputs.
+
+        Arguments:
+            data:       Tensor of shape (B, C, N, M) of data values about (t, x, y).
+            label:      Tensor of shape (B,) of labels.
+        where B is batch size, number of time steps C = 3, number of x values N = 13 and number of y values M = 13.
+
+        C index increments upwards for latter times.  Note that (N, M) = (13, 13); this is so the solution can
+        computed at additional locations surrouding the query point so derivatives can be approximated by finite
+        differences.
+
+        C index increments upwards for latter times.
+        """
         self.train()
 
         b, c, n, m = data.shape
-        if c != 4:
-            raise ValueError(f'Expected C = 4 timesteps, got {c}!')
+        if c != 3:
+            raise ValueError(f'Expected C = 3 timesteps, got {c}!')
         if n != 13 or m != 13:
             raise ValueError(f'Expected number of x values, y values (N, M) = (13, 13), got {(n, m)}!')
+        
+        if label.shape != (b,):
+            raise ValueError(f'Expected labels of shape (B,) = ({b},)W, got {label.shape}!')
 
-        patches = nn.Unfold(11)(data[:, :-1]).reshape(b, 3, 11, 11, 9)
+        patches = nn.functional.unfold(data, 11).reshape(b, 3, 11, 11, 9)
         outputs = torch.zeros((b, 3, 3, 5))
         for k in range(9):
             i, j = k // 3, k % 3
             outputs[:, i, j] = self._forward(patches[..., k])
         loss = self._loss(data, label, outputs)
 
-        loss.backward()
+        return loss
 
     def _loss(
         self,
@@ -376,13 +398,27 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         Returns a tensor.
         """
+        b, c, n, m = data.shape
+        if c != 3:
+            raise ValueError(f'Expected C = 3 timesteps, got {c}!')
+        if n != 13 or m != 13:
+            raise ValueError(f'Expected number of x values, y values (N, M) = (13, 13), got {(n, m)}!')
+
+        ob, on, om, oo = outputs.shape
+        if ob != b:
+            raise ValueError(f'Expected output batch size B = {b}, got {ob}!')
+        if on != 3 or om != 3:
+            raise ValueError(f'Expected number of output x values, y values (N, M) = (3, 3), got {(on, om)}!')
+        if oo != 5:
+            raise ValueError(f'Expected output channels O = 5, got {oo}!')
+
         (
             soln,
             kappa,
             velx,
             vely,
             force
-        ) = self._unpack_outputs(outputs)
+        ) = self._unpack_outputs(outputs[:, 1, 1, :])
         (
             soln_x,
             kappa_x,
@@ -411,12 +447,12 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
             _,
             _
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_yy))
-        
+
         l_physics = (
             self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * soln_x + kappa_y * soln_y + kappa * (soln_xx + soln_yy)) +
             self.v0 * self.t0 / self.L0 * (soln * (velx_x + vely_y) + soln_x * velx + soln_y * vely) * -1 +
             self.f0 * self.t0 / self.u0 * force +
-            (soln - data[:, 3, 6, 6]) / self.s * -1
+            (soln - data[:, 2, 6, 6]) / self.s * -1
         ) ** 2
         l_data = (
             soln - label
