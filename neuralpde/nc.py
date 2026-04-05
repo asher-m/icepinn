@@ -8,6 +8,7 @@ import datetime
 import netCDF4
 import numpy as np
 import numpy.typing as npt
+import scipy.interpolate as interpolate
 
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path
@@ -65,6 +66,7 @@ class SeaIceV6:
         y:                           Array of shape (y,) of y-offsets in meters of the center of each cell from the projection center.
     """
     nc_files: InitVar[Sequence[str | Path]]
+    fill_nan: InitVar[bool] = False
 
     date: npt.NDArray[np.datetime64] = field(init=False)
 
@@ -83,12 +85,15 @@ class SeaIceV6:
     x: npt.NDArray[np.float64] = field(init=False)
     y: npt.NDArray[np.float64] = field(init=False)
 
-    def __post_init__(self, nc_files: Sequence[str | Path]) -> None:
+    def __post_init__(self, nc_files: Sequence[str | Path], fill_nan: bool) -> None:
         """
         Initialize sea ice data in NOAA/NSIDC version 6 format.
 
-        Args:
-            nc_files (list of str or list of pathlib.Path):     .nc file to be opened
+        Arguments:
+            nc_files (list of str or list of pathlib.Path):
+                List of .nc files to be opened.
+            fill_nan (bool):
+                Fill NaN values with a nearest non-nan value.  Does not affect flags.  Default is False.
         """
         if len(nc_files) < 1:
             raise ValueError('Received an empty list of files!')
@@ -148,6 +153,23 @@ class SeaIceV6:
         self.longitude = longitude[0].T
         self.x = x[0]
         self.y = y[0]
+
+        if fill_nan:
+            # fill nans with nearest non-nan value
+            # this is a bit hacky but it works and is fast enough for our purposes
+            for i in range(self.seaice_conc.shape[0]):
+                print(f'working on {i}')
+                mask = np.isnan(self.seaice_conc[i])
+                self.seaice_conc[i][mask] = interpolate.NearestNDInterpolator(
+                    np.stack(np.meshgrid(self.y, self.x), axis=-1)[~mask].reshape(-1, 2),
+                    self.seaice_conc[i][~mask].ravel()
+                )(np.stack(np.meshgrid(self.y, self.x), axis=-1)[mask].reshape(-1, 2))
+                # this is not ideal: we are interpolating stdev values with the nearest non-nan stdev value; this is (sharply) incorrect,
+                # but it is unlikely we will attempt to compute uncertainty outside the domain, so it is unlikely to cause problems in practice
+                self.seaice_conc_stdev[i][mask] = interpolate.NearestNDInterpolator(
+                    np.stack(np.meshgrid(self.y, self.x), axis=-1)[~mask].reshape(-1, 2),
+                    self.seaice_conc_stdev[i][~mask].ravel()
+                )(np.stack(np.meshgrid(self.y, self.x), axis=-1)[mask].reshape(-1, 2))
 
 
 def check_boundaries(indices: List[int] | Tuple[int] | npt.NDArray[np.intp], d: SeaIceV6) -> None:

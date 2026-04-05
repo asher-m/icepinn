@@ -4,3 +4,6 @@
 [submodule "raissi-2019"]
 	path = raissi-2019
 	url = https://github.com/maziarraissi/PINNs.git
+[submodule "neuralpde/torch-interpol"]
+	path = torch-interpol
+	url = https://github.com/balbasty/torch-interpol.git
