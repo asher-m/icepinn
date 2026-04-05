@@ -240,29 +240,6 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
         self.load_state_dict(torch.load(path), **kwargs)
 
     def forward(
-        self,
-        data: npt.NDArray
-    ) -> npt.NDArray:
-        """
-        Compute the neural network posterior of the coordinates and data about the point (t, x, y).
-
-        Accepts numpy arrays as inputs.
-
-        Arguments:
-            data:                   Array of shape (B, C, N, M) of data values about (t, x, y).
-        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (11, 11).
-
-        C index increments upwards for latter times.
-
-        Returns a numpy array.
-        """
-        return torch2np(
-            self._forward(
-                np2torch(data)
-            )
-        )
-
-    def _forward(
             self,
             data: torch.Tensor
     ) -> torch.Tensor:
@@ -304,39 +281,6 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
     def fit(
         self,
-        data: npt.NDArray,
-        label: npt.NDArray
-    ):
-        """
-        Compute fit of network to data.
-
-        Accepts numpy arrays as inputs.
-
-        .. note::
-            You probably don't want this unless you know (for sure) what you're doing.
-
-        Arguments:
-            s:          0-d tensor of time delta (i.e., :math:`dt`).
-            h:          0-d tensor of spatial delta (e.g., :math:`dx` or :math:`dy`).
-            data:       Tensor of shape (B, C, N, M) of data values about (t, x, y).
-            label:      Tensor of shape (B,) of labels.
-        where B is batch size, number of time steps C = 3, number of x values N = 13 and number of y values M = 13.
-
-        C index increments upwards for latter times.  Note that (N, M) = (13, 13); this is so the solution can
-        computed at additional locations surrouding the query point so derivatives can be approximated by finite
-        differences.
-
-        C index increments upwards for latter times.
-        """
-        return torch2np(
-            self._fit(
-                np2torch(data),
-                np2torch(label)
-            )
-        )
-
-    def _fit(
-        self,
         data: torch.Tensor,
         label: torch.Tensor
     ):
@@ -371,12 +315,12 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
         outputs = torch.zeros((b, 3, 3, 5))
         for k in range(9):
             i, j = k // 3, k % 3
-            outputs[:, i, j] = self._forward(patches[..., k])
-        loss = self._loss(data, label, outputs)
+            outputs[:, i, j] = self.forward(patches[..., k])
+        loss = self._compute_loss(data, label, outputs)
 
         return loss
 
-    def _loss(
+    def _compute_loss(
         self,
         data: torch.Tensor,
         label: torch.Tensor,
