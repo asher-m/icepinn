@@ -171,9 +171,9 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
         self.k_avg = nn.Buffer(
             torch.tensor(
                 [  # normalized negative exponential weighting of points about query point
-                    [0.04491922, 0.12210311, 0.04491922],
-                    [0.12210311, 0.33191066, 0.12210311],
-                    [0.04491922, 0.12210311, 0.04491922]
+                    [0., 0., 0.],
+                    [0., 1., 0.],
+                    [0., 0., 0.]
                 ],
                 dtype=DTYPE
             )
