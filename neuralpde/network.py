@@ -18,21 +18,6 @@ else:
 DTYPE = torch.float32
 
 
-def normalize_xy(x: np.ndarray, y: np.ndarray) -> tuple[tuple[float, float], tuple[np.ndarray, np.ndarray]]:
-    """
-    Normalize spatial coordinates (from meters to unitless dimension on the interval [-1, 1]).
-
-    Returns a tuple of ((scalex, scaley), (x_normalized, y_normalized)).
-    """
-    assert x.ndim == 1 and y.ndim == 1, "I don't know how to handle multi-D arrays!"
-    scalex, scaley = np.ptp(x), np.ptp(y)
-    return (scalex, scaley), ((x - np.mean(x)) / scalex, (y - np.mean(y)) / scaley)
-
-
-def normalize_data(u: np.ndarray):
-    raise ValueError('Sea ice data already normalized!')
-
-
 def get_rk_scheme(q: int = 100) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Get an implicit Runge-Kutta scheme with `q` stages.
@@ -125,11 +110,11 @@ class AdrNondim:
         self.f0 = nn.Buffer(torch.tensor(f0, dtype=DTYPE, device=DEVICE))
 
 
-class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
+class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
     s: nn.Buffer
-    """0-d tensor of time delta (i.e., :math:`dt`)."""
+    """Time delta (i.e., :math:`dt`)."""
     h: nn.Buffer
-    """0-d tensor of spatial delta (e.g., :math:`dx` or :math:`dy`)."""
+    """Spatial delta (e.g., :math:`dx` or :math:`dy`)."""
 
     loss_weights: nn.Buffer
     """Weights of components of loss function."""
@@ -246,7 +231,7 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
             )
         )
 
-        self.mix_a = nn.Parameter(torch.normal(0, 1, (128, 3 * 5)))  # 128 output size, 3 time channels * 5 space channels
+        self.mix_a = nn.Parameter(torch.normal(0, 1, (128, 5 * 3 * 81)))  # 128 output size
         self.mix_b = nn.Parameter(torch.normal(0, 1, (128,)))
 
         self.mlp = nn.Sequential(
@@ -258,7 +243,7 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
             nn.Linear(128, 128),
             nn.Tanh(),
         )
-        self.final = nn.Linear(128, 5)  # 5 output channels like (pred, pred_kappa, pred_vx, pred_vy, pred_f)
+        self.final = nn.Linear(128, 5)
 
     def save(self, path: str | Path):
         torch.save(self.state_dict(), path)
@@ -268,7 +253,6 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
     def forward(
         self,
-        nondimensionalization: npt.NDArray,
         data: npt.NDArray
     ) -> npt.NDArray:
         """
@@ -278,7 +262,7 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         Arguments:
             data:                   Array of shape (B, C, N, M) of data values about (t, x, y).
-        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (5, 5).
+        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (11, 11).
 
         C index increments upwards for latter times.
 
@@ -301,26 +285,34 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
 
         Arguments:
             data:       Tensor of shape (B, C, N, M) of DIMENSIONLESS data values about (t, x, y).
-        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (5, 5).
+        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (11, 11).
 
         C index increments upwards for latter times.
 
         Returns a tensor.
         """
-        data_avg = torch.einsum('bcij,ij->bc', data, self.k_avg)
-        data_x = torch.einsum('bcij,ij->bc', data, self.k_x)
-        data_y = torch.einsum('bcij,ij->bc', data, self.k_y)
-        data_xx = torch.einsum('bcij,ij->bc', data, self.k_xx)
-        data_yy = torch.einsum('bcij,ij->bc', data, self.k_yy)
+        b, c, n, m = data.shape
+        if c != 3:
+            raise ValueError(f'Expected C = 3 timesteps, got {c}!')
+        if n != 11 or m != 11:
+            raise ValueError(f'Expected number of x values, y values (N, M) = (11, 11), got {(n, m)}!')
 
-        s_mixed = torch.einsum(
+        patches = nn.functional.unfold(data, 3).reshape((b, c, 3, 3, 81))
+        patches_avg = torch.einsum('bcijl,ij->bcl', patches, self.k_avg).reshape((b, -1))
+        patches_x = torch.einsum('bcijl,ij->bcl', patches, self.k_x).reshape((b, -1))
+        patches_y = torch.einsum('bcijl,ij->bcl', patches, self.k_y).reshape((b, -1))
+        patches_xx = torch.einsum('bcijl,ij->bcl', patches, self.k_xx).reshape((b, -1))
+        patches_yy = torch.einsum('bcijl,ij->bcl', patches, self.k_yy).reshape((b, -1))
+
+        mixed = torch.einsum(
             'bp,ip->bi',
-            torch.cat((data_avg, data_x, data_y, data_xx, data_yy), dim=1)
-        )
-        s_hidden = self.mlp(s_mixed)
-        s_output = self.final(s_hidden)
+            torch.cat((patches_avg, patches_x, patches_y, patches_xx, patches_yy), dim=1),
+            self.mix_a
+        ) + self.mix_b
+        hidden = self.mlp(mixed)
+        output = self.final(hidden)
 
-        return s_output
+        return output
 
     def _fit(
         self,
@@ -337,9 +329,9 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
             h:          0-d tensor of spatial delta (e.g., :math:`dx` or :math:`dy`).
             data:       Tensor of shape (B, C, N, M) of data values about (t, x, y).
             label:      Tensor of shape (B,) of labels.
-        where B is batch size, number of time steps C = 3, number of x values N = 5 and number of y values M = 5.
+        where B is batch size, number of time steps C = 3, number of x values N = 13 and number of y values M = 13.
 
-        C index increments upwards for latter times.  Note that (N, M) = (5, 5); this is so the solution can
+        C index increments upwards for latter times.  Note that (N, M) = (13, 13); this is so the solution can
         computed at additional locations surrouding the query point so derivatives can be approximated by finite
         differences.
 
@@ -348,12 +340,12 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
         self.train()
 
         b, c, n, m = data.shape
-        if not c == 3:
-            raise ValueError(f'Expected C = 3 timesteps, got {c}!')
-        if not n == 5 and m == 5:
-            raise ValueError(f'Expected number of x values, y values (N, M) = (5, 5), got {(n, m)}!')
+        if c != 4:
+            raise ValueError(f'Expected C = 4 timesteps, got {c}!')
+        if n != 13 or m != 13:
+            raise ValueError(f'Expected number of x values, y values (N, M) = (13, 13), got {(n, m)}!')
 
-        patches = nn.Unfold(3)(data).reshape(b, c, 3, 3, 9)
+        patches = nn.Unfold(11)(data[:, :-1]).reshape(b, 3, 11, 11, 9)
         outputs = torch.zeros((b, 3, 3, 5))
         for k in range(9):
             i, j = k // 3, k % 3
@@ -377,7 +369,7 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
             data:               Tensor of shape (B, C, N, M) of data values about (t, x, y).
             label:              Tensor of shape (B,) of labels.
             outputs:            Tensor of shape (B, 3, 3, O) of values.
-        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (5, 5),
+        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (11, 11),
         and number of output channels O = 5.
 
         C index increments upwards for latter times.
@@ -424,7 +416,7 @@ class SeaIceAdr_5k3_t3_w128_d3(AdrNondim, nn.Module):
             self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * soln_x + kappa_y * soln_y + kappa * (soln_xx + soln_yy)) +
             self.v0 * self.t0 / self.L0 * (soln * (velx_x + vely_y) + soln_x * velx + soln_y * vely) * -1 +
             self.f0 * self.t0 / self.u0 * force +
-            (soln - data[:, 2, 2, 2]) / self.s * -1
+            (soln - data[:, 3, 6, 6]) / self.s * -1
         ) ** 2
         l_data = (
             soln - label
