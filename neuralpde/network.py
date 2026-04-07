@@ -2,14 +2,10 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 from pathlib import Path
 
 from . import layer
-
-
-DTYPE = torch.float32
 
 
 def get_rk_scheme(q: int = 100) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -23,7 +19,7 @@ def get_rk_scheme(q: int = 100) -> tuple[torch.Tensor, torch.Tensor, torch.Tenso
         q (int):
             Integer number of stages.
     """
-    d = np.loadtxt(Path(__file__).parent / f'../raissi-2019/Utilities/IRK_weights/Butcher_IRK{q}.txt').astype(np.float32)
+    d = np.loadtxt(Path(__file__).parent / f'../raissi-2019/Utilities/IRK_weights/Butcher_IRK{q}.txt').astype(np.float64)
     a = np2torch(d[:q**2].reshape((q, q)))
     b = np2torch(d[q**2: q**2 + q])
     c = np2torch(d[q**2 + q:])
@@ -31,7 +27,7 @@ def get_rk_scheme(q: int = 100) -> tuple[torch.Tensor, torch.Tensor, torch.Tenso
     return a, b, c
 
 
-def np2torch(d: npt.NDArray, dtype: torch.dtype = DTYPE) -> torch.Tensor:
+def np2torch(d: npt.NDArray) -> torch.Tensor:
     """
     Export numpy data to torch in every meaningful way, including sending it to the
     compute accelerator and casting it to the appropriate datatype.
@@ -40,9 +36,9 @@ def np2torch(d: npt.NDArray, dtype: torch.dtype = DTYPE) -> torch.Tensor:
         d (array):
             Numpy array to export.
         dtype (torch.dtype):
-            Datatype to which to cast the array.  Default is DTYPE (torch.float32 unless overridden).
+            Datatype to which to cast the array.  Default is DTYPE (torch.float64 unless overridden).
     """
-    return torch.from_numpy(d).to(dtype)
+    return torch.from_numpy(d)
 
 
 def torch2np(d: torch.Tensor) -> np.ndarray:
@@ -53,7 +49,7 @@ def torch2np(d: torch.Tensor) -> np.ndarray:
         d (torch.Tensor):
             Torch tensor to export.
     """
-    return d.detach().cpu().numpy()
+    return d.numpy(force=True)
 
 
 class AdrNondim:
@@ -72,23 +68,23 @@ class AdrNondim:
 
     def __init__(
         self,
-        u0: npt.ArrayLike,
-        L0: npt.ArrayLike,
-        t0: npt.ArrayLike,
-        k0: npt.ArrayLike,
-        v0: npt.ArrayLike,
-        f0: npt.ArrayLike
+        u0: npt.NDArray[np.floating] | float,
+        L0: npt.NDArray[np.floating] | float,
+        t0: npt.NDArray[np.floating] | float,
+        k0: npt.NDArray[np.floating] | float,
+        v0: npt.NDArray[np.floating] | float,
+        f0: npt.NDArray[np.floating] | float
     ):
         """
         Initialize ADR equation non-dimensionalization constants.
 
         Arguments:
-            u0:     Solution/data normalization.
-            L0:     Length-scale normalization.
-            t0:     Time-scale normalization.
-            k0:     Diffusivity normalization.
-            v0:     Velocity normalization.
-            f0:     Forcing normalization.
+            u0:     Scalar solution/data normalization.
+            L0:     Scalar length-scale normalization.
+            t0:     Scalar time-scale normalization.
+            k0:     Scalar diffusivity normalization.
+            v0:     Scalar velocity normalization.
+            f0:     Scalar forcing normalization.
 
         .. note::
             These parameters can be unintuitive and challenging to guess.  Either use the numbers
@@ -96,15 +92,15 @@ class AdrNondim:
         """
         super().__init__()
 
-        self.u0 = nn.Buffer(torch.tensor(u0, dtype=DTYPE))
-        self.L0 = nn.Buffer(torch.tensor(L0, dtype=DTYPE))
-        self.t0 = nn.Buffer(torch.tensor(t0, dtype=DTYPE))
-        self.k0 = nn.Buffer(torch.tensor(k0, dtype=DTYPE))
-        self.v0 = nn.Buffer(torch.tensor(v0, dtype=DTYPE))
-        self.f0 = nn.Buffer(torch.tensor(f0, dtype=DTYPE))
+        self.u0 = nn.Buffer(torch.tensor(u0))
+        self.L0 = nn.Buffer(torch.tensor(L0))
+        self.t0 = nn.Buffer(torch.tensor(t0))
+        self.k0 = nn.Buffer(torch.tensor(k0))
+        self.v0 = nn.Buffer(torch.tensor(v0))
+        self.f0 = nn.Buffer(torch.tensor(f0))
 
 
-class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
+class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
     s: nn.Buffer
     """Time delta (i.e., :math:`dt`)."""
     h: nn.Buffer
@@ -135,14 +131,14 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
     """Mapping from final hidden layer to output."""
 
     def __init__(self, 
-        u0: npt.ArrayLike,
-        L0: npt.ArrayLike,
-        t0: npt.ArrayLike,
-        k0: npt.ArrayLike,
-        v0: npt.ArrayLike,
-        f0: npt.ArrayLike,
-        s: npt.ArrayLike,
-        h: npt.ArrayLike,
+        u0: npt.NDArray[np.floating] | float,
+        L0: npt.NDArray[np.floating] | float,
+        t0: npt.NDArray[np.floating] | float,
+        k0: npt.NDArray[np.floating] | float,
+        v0: npt.NDArray[np.floating] | float,
+        f0: npt.NDArray[np.floating] | float,
+        s: npt.NDArray[np.floating] | float,
+        h: npt.NDArray[np.floating] | float
     ) -> None:
         """
         Arguments:
@@ -157,14 +153,19 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
         """
         super().__init__(u0, L0, t0, k0, v0, f0)
 
-        self.s = nn.Buffer(torch.tensor(s, dtype=DTYPE))
-        self.h = nn.Buffer(torch.tensor(h, dtype=DTYPE))
+        self.s = nn.Buffer(torch.tensor(s))
+        self.h = nn.Buffer(torch.tensor(h))
 
+        loss_weights = torch.tensor(
+            [
+                3,  # physics
+                3,  # data
+                1,  # parameter magnitude
+                2,  # parameter smoothness
+            ]
+        )
         self.loss_weights = nn.Buffer(
-            torch.tensor(
-                [0.5, 0.5],
-                dtype=DTYPE
-            )
+            loss_weights / torch.sqrt(torch.sum(loss_weights ** 2))
         )
 
         # TODO: Consider constrained family of finite difference kernels.
@@ -174,8 +175,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0., 0., 0.],
                     [0., 1., 0.],
                     [0., 0., 0.]
-                ],
-                dtype=DTYPE
+                ]
             )
         )
         self.k_x = nn.Buffer(
@@ -184,8 +184,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0., -1., 0.],
                     [0.,  0., 0.],
                     [0.,  1., 0.]
-                ],
-                dtype=DTYPE
+                ]
             )
         )
         self.k_y = nn.Buffer(
@@ -194,8 +193,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [ 0., 0., 0.],
                     [-1., 0., 1.],
                     [ 0., 0., 0.]
-                ],
-                dtype=DTYPE
+                ]
             )
         )
         self.k_xx = nn.Buffer(
@@ -204,8 +202,7 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0.,  1., 0.],
                     [0., -2., 0.],
                     [0.,  1., 0.]
-                ],
-                dtype=DTYPE
+                ]
             )
         )
         self.k_yy = nn.Buffer(
@@ -214,24 +211,23 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
                     [0.,  0., 0.],
                     [1., -2., 1.],
                     [0.,  0., 0.]
-                ],
-                dtype=DTYPE
+                ]
             )
         )
 
-        self.mix_a = nn.Parameter(torch.normal(0, 1, (128, 5 * 3 * 81), dtype=DTYPE))  # 128 output size
-        self.mix_b = nn.Parameter(torch.normal(0, 1, (128,), dtype=DTYPE))
+        self.mix_a = nn.Parameter(torch.normal(0, 1, (32, 5 * 3 * 81)))  # 128 output size
+        self.mix_b = nn.Parameter(torch.normal(0, 1, (32,)))
 
         self.mlp = nn.Sequential(
             nn.Tanh(),
-            nn.Linear(128, 128),
+            nn.Linear(32, 32),
             nn.Tanh(),
-            nn.Linear(128, 128),
+            nn.Linear(32, 32),
             nn.Tanh(),
-            nn.Linear(128, 128),
+            nn.Linear(32, 32),
             nn.Tanh(),
         )
-        self.final = nn.Linear(128, 5)
+        self.final = nn.Linear(32, 5)
 
     def save(self, path: str | Path):
         torch.save(self.state_dict(), path)
@@ -354,58 +350,84 @@ class SeaIceAdr_x5_5k3_t3_w128_d3(AdrNondim, nn.Module):
             raise ValueError(f'Expected output channels O = 5, got {oo}!')
 
         (
-            soln,
+            _,
             kappa,
             velx,
             vely,
             force
         ) = self._unpack_outputs(outputs[:, 1, 1, :])
         (
-            soln_x,
+            _,
             kappa_x,
             velx_x,
             _,
-            _
+            force_x
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_x))
         (
-            soln_y,
+            _,
             kappa_y,
             _,
             vely_y,
-            _
+            force_y
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_y))
         (
-            soln_xx,
+            _,
             _,
             _,
             _,
             _
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_xx))
         (
-            soln_yy,
+            _,
             _,
             _,
             _,
             _
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_yy))
 
-        l_physics = (
+        soln = data[:, 2, 6, 6]
+        soln_x = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_x)
+        soln_y = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_y)
+        soln_xx = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_xx)
+        soln_yy = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_yy)
+
+        soln_t = (
             self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * soln_x + kappa_y * soln_y + kappa * (soln_xx + soln_yy)) +
             self.v0 * self.t0 / self.L0 * (soln * (velx_x + vely_y) + soln_x * velx + soln_y * vely) * -1 +
-            self.f0 * self.t0 / self.u0 * force +
-            (soln - data[:, 2, 6, 6]) / self.s * -1
+            self.f0 * self.t0 / self.u0 * force
+        )
+
+        l_physics = (
+            label - (soln + soln_t * self.s)
         ) ** 2
         l_data = (
             soln - label
         ) ** 2
+        l_norm = (  # normalization of params
+            kappa ** 2 +
+            velx ** 2 +
+            vely ** 2 +
+            force ** 2
+        )
+        l_norm_diff = (  # normalization of smoothness of params
+            velx_x ** 2 +
+            vely_y ** 2 +
+            kappa_x ** 2 +
+            kappa_y ** 2 +
+            force_x ** 2 +
+            force_y ** 2
+        )
 
         l = torch.stack(
             (
                 l_physics,
-                l_data
+                l_data,
+                l_norm,
+                l_norm_diff
             ),
             dim=-1
-        ) @ self.loss_weights
+        # ) @ self.loss_weights
+        )
 
         return l
 
