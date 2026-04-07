@@ -227,7 +227,7 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
             nn.Linear(32, 32),
             nn.Tanh(),
         )
-        self.final = nn.Linear(32, 5)
+        self.final = nn.Linear(32, 4)
 
     def save(self, path: str | Path):
         torch.save(self.state_dict(), path)
@@ -235,7 +235,7 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
     def load(self, path: str | Path, **kwargs):
         self.load_state_dict(torch.load(path), **kwargs)
 
-    def forward(
+    def _forward_patch(
             self,
             data: torch.Tensor
     ) -> torch.Tensor:
@@ -275,10 +275,10 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
 
         return output
 
-    def fit(
+    def forward(
         self,
         data: torch.Tensor,
-        label: torch.Tensor
+        label: torch.Tensor | None = None
     ):
         """
         Compute fit of network to data.
@@ -302,39 +302,80 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
         if n != 13 or m != 13:
             raise ValueError(f'Expected number of x values, y values (N, M) = (13, 13), got {(n, m)}!')
         
-        if label.shape != (b,):
+        if label is not None and label.shape != (b,):
             raise ValueError(f'Expected labels of shape (B,) = ({b},), got {label.shape}!')
 
         patches = nn.functional.unfold(data, 11).reshape(b, 3, 11, 11, 9)
         patches = patches.permute(0, 4, 1, 2, 3).reshape(b * 9, 3, 11, 11)
-        outputs = self.forward(patches).reshape(b, 3, 3, 5)
+        outputs = self._forward_patch(patches).reshape(b, 3, 3, 4)
 
-        loss = self._compute_loss(data, label, outputs)
+        local = data[:, 2, 6, 6]
+        local_t = self._compute_rhs(data, outputs)
+        prediction = local + local_t * self.s
 
-        return loss
+        if label is not None:
+            l_pred = (label - prediction) ** 2
 
-    def _compute_loss(
+            (
+                kappa_x,
+                velx_x,
+                vely_x,
+                force_x 
+            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_x))
+            (
+                kappa_y,
+                velx_y,
+                vely_y,
+                force_y 
+            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_y))
+            (
+                kappa_xx,
+                velx_xx,
+                vely_xx,
+                force_xx 
+            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_xx))
+            (
+                kappa_yy,
+                velx_yy,
+                vely_yy,
+                force_yy 
+            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_yy))
+            l_kappa_o1_reg = kappa_x ** 2 + kappa_y ** 2
+            l_vel_o1_reg = velx_x ** 2 + velx_y ** 2 + vely_x ** 2 + vely_y **2
+            l_force_o1_reg = force_x ** 2 + force_y **2
+            l_kappa_o2_reg = kappa_xx **2 + kappa_yy ** 2
+            l_vel_o2_reg = velx_xx ** 2 + velx_yy ** 2 + vely_xx ** 2 + vely_yy ** 2
+            l_force_o2_reg = force_xx ** 2 + force_yy ** 2
+
+            return (
+                prediction, 
+                torch.stack(
+                    (
+                        l_pred,
+                        l_kappa_o1_reg,
+                        l_vel_o1_reg,
+                        l_force_o1_reg,
+                        l_kappa_o2_reg,
+                        l_vel_o2_reg,
+                        l_force_o2_reg
+                    )
+                )
+            )
+
+        else:
+            return torch.cat(
+                (
+                    torch.unsqueeze(prediction, -1),
+                    outputs[:, 1, 1, :]
+                ),
+                dim=-1
+            )
+
+    def _compute_rhs(
         self,
         data: torch.Tensor,
-        label: torch.Tensor,
-        outputs: torch.Tensor,
+        outputs: torch.Tensor
     ):
-        """
-        Compute loss of outputs.
-
-        Accepts torch tensors as inputs.
-
-        Arguments:
-            data:               Tensor of shape (B, C, N, M) of data values about (t, x, y).
-            label:              Tensor of shape (B,) of labels.
-            outputs:            Tensor of shape (B, 3, 3, O) of values.
-        where B is batch size, number of time steps C = 3, number of x and y values (N, M) = (11, 11),
-        and number of output channels O = 5.
-
-        C index increments upwards for latter times.
-
-        Returns a tensor.
-        """
         b, c, n, m = data.shape
         if c != 3:
             raise ValueError(f'Expected C = 3 timesteps, got {c}!')
@@ -346,90 +387,41 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
             raise ValueError(f'Expected output batch size B = {b}, got {ob}!')
         if on != 3 or om != 3:
             raise ValueError(f'Expected number of output x values, y values (N, M) = (3, 3), got {(on, om)}!')
-        if oo != 5:
-            raise ValueError(f'Expected output channels O = 5, got {oo}!')
+        if oo != 4:
+            raise ValueError(f'Expected output channels O = 4, got {oo}!')        
 
         (
-            _,
             kappa,
             velx,
             vely,
             force
         ) = self._unpack_outputs(outputs[:, 1, 1, :])
         (
-            _,
             kappa_x,
             velx_x,
             _,
-            force_x
+            _
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_x))
         (
-            _,
             kappa_y,
             _,
             vely_y,
-            force_y
+            _
         ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_y))
-        (
-            _,
-            _,
-            _,
-            _,
-            _
-        ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_xx))
-        (
-            _,
-            _,
-            _,
-            _,
-            _
-        ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_yy))
 
-        soln = data[:, 2, 6, 6]
-        soln_x = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_x)
-        soln_y = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_y)
-        soln_xx = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_xx)
-        soln_yy = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_yy)
+        local = data[:, 2, 6, 6]
+        local_x = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_x)
+        local_y = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_y)
+        local_xx = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_xx)
+        local_yy = torch.einsum('bnm,nm->b', data[:, 2, 5:8, 5:8], self.k_yy)
 
-        soln_t = (
-            self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * soln_x + kappa_y * soln_y + kappa * (soln_xx + soln_yy)) +
-            self.v0 * self.t0 / self.L0 * (soln * (velx_x + vely_y) + soln_x * velx + soln_y * vely) * -1 +
+        local_t = (
+            self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * local_x + kappa_y * local_y + kappa * (local_xx + local_yy)) +
+            self.v0 * self.t0 / self.L0 * (local * (velx_x + vely_y) + local_x * velx + local_y * vely) * -1 +
             self.f0 * self.t0 / self.u0 * force
         )
 
-        l_physics = (
-            label - (soln + soln_t * self.s)
-        ) ** 2
-        l_data = (
-            soln - label
-        ) ** 2
-        l_norm = (  # normalization of params
-            kappa ** 2 +
-            velx ** 2 +
-            vely ** 2 +
-            force ** 2
-        )
-        l_norm_diff = (  # normalization of smoothness of params
-            velx_x ** 2 +
-            vely_y ** 2 +
-            kappa_x ** 2 +
-            kappa_y ** 2 +
-            force_x ** 2 +
-            force_y ** 2
-        )
-
-        l = torch.stack(
-            (
-                l_physics,
-                l_data,
-                l_norm,
-                l_norm_diff
-            ),
-            dim=-1
-        # ) @ self.loss_weights
-        )
-
-        return l
+        return local_t
 
     def _unpack_outputs(
         self,
@@ -445,20 +437,18 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
 
         Arguments:
             outputs:      Tensor of shape (B, ..., O) of output values.
-        where B is batch size and number of output channels O = 5.
+        where B is batch size and number of output channels O = 4.
 
         Returns a tuple of tensors.
         """
-        soln = outputs[..., 0]
-        kappa = outputs[..., 1]
-        velx = outputs[..., 2]
-        vely = outputs[..., 3]
-        force = outputs[..., 4]
-        return soln, kappa, velx, vely, force
+        kappa = outputs[..., 0]
+        velx = outputs[..., 1]
+        vely = outputs[..., 2]
+        force = outputs[..., 3]
+        return kappa, velx, vely, force
 
     def _pack_outputs(
         self,
-        soln: torch.Tensor,
         kappa: torch.Tensor,
         velx: torch.Tensor,
         vely: torch.Tensor,
@@ -480,11 +470,10 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
             force:       Tensor of shape (B, ...) of f.
         where B is batch size.
             
-        Returns a tensor of shape (B, ..., 5).
+        Returns a tensor of shape (B, ..., 4).
         """
         return torch.stack(
             (
-                soln,
                 kappa,
                 velx,
                 vely,
