@@ -106,9 +106,6 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
     h: nn.Buffer
     """Spatial delta (e.g., :math:`dx` or :math:`dy`)."""
 
-    loss_weights: nn.Buffer
-    """Weights of components of loss function."""
-
     k_avg: nn.Buffer
     """Local average kernel."""
     k_x: nn.Buffer
@@ -130,7 +127,8 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
     final: nn.Module
     """Mapping from final hidden layer to output."""
 
-    def __init__(self, 
+    def __init__(
+        self, 
         u0: npt.NDArray[np.floating] | float,
         L0: npt.NDArray[np.floating] | float,
         t0: npt.NDArray[np.floating] | float,
@@ -155,18 +153,6 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
 
         self.s = nn.Buffer(torch.tensor(s))
         self.h = nn.Buffer(torch.tensor(h))
-
-        loss_weights = torch.tensor(
-            [
-                3,  # physics
-                3,  # data
-                1,  # parameter magnitude
-                2,  # parameter smoothness
-            ]
-        )
-        self.loss_weights = nn.Buffer(
-            loss_weights / torch.sqrt(torch.sum(loss_weights ** 2))
-        )
 
         # TODO: Consider constrained family of finite difference kernels.
         self.k_avg = nn.Buffer(
@@ -483,3 +469,125 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
             ),
             dim=-1
         )
+
+
+class ModelV2(ForcedAdvectionDiffusion, nn.Module):
+    s: nn.Buffer
+    """Time delta (i.e., :math:`dt`)."""
+    h: nn.Buffer
+    """Spatial delta (e.g., :math:`dx` or :math:`dy`)."""
+
+    mlp: nn.Sequential
+    """MLP stack on top of space-time convolution."""
+    final: nn.Module
+    """Mapping from final hidden layer to output."""
+
+    def __init__(
+        self, 
+        u0: npt.NDArray[np.floating] | float,
+        L0: npt.NDArray[np.floating] | float,
+        t0: npt.NDArray[np.floating] | float,
+        k0: npt.NDArray[np.floating] | float,
+        v0: npt.NDArray[np.floating] | float,
+        f0: npt.NDArray[np.floating] | float,
+        s: npt.NDArray[np.floating] | float,
+        h: npt.NDArray[np.floating] | float
+    ) -> None:
+        """
+        Arguments:
+            u0:     Solution/data normalization.
+            L0:     Length-scale normalization.
+            t0:     Time-scale normalization.
+            k0:     Diffusivity normalization.
+            v0:     Velocity normalization.
+            f0:     Forcing normalization.
+            s:          Time delta (i.e., :math:`dt`).
+            h:          Spatial delta (e.g., :math:`dx` or :math:`dy`).
+        """
+        super().__init__(u0, L0, t0, k0, v0, f0)
+
+        self.s = nn.Buffer(torch.tensor(s))
+        self.h = nn.Buffer(torch.tensor(h))
+
+        self.mlp = nn.Sequential(
+            nn.Tanh(),
+            nn.Linear(32, 32),
+            nn.Tanh(),
+            nn.Linear(32, 32),
+            nn.Tanh(),
+            nn.Linear(32, 32),
+            nn.Tanh(),
+        )
+        self.final = nn.Linear(32, 4)
+
+    @staticmethod
+    def K(
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute convolution of data with tensor product cubic B-spline kernel of radius equal to cell diameter.
+
+        Arguments:
+            data:       Tensor of shape (B, C, N, M) of data values about (t, x, y).
+            xi:         Tensor of shape (B,) of x index translation of kernel relative to data center.
+            yi:         Tensor of shape (B,) of y index translation of kernel relative to data center.
+            ti:         Tensor of shape (B,) of t index translation of kernel relative to data center.
+        """
+        b, c, n, m = data.shape
+        if c != 3 or n != 3 or m != 3:
+            raise ValueError(f'Expected (C, N, M) = (3, 3, 3), got {c}!')
+        
+        bx, = xi.shape
+        by, = yi.shape
+        bt, = ti.shape
+        if bx != b or by != b or bt != b:
+            raise ValueError
+
+        if torch.any(torch.abs(xi) > 0.5) or torch.any(torch.abs(yi) > 0.5) or torch.any(torch.abs(ti) > 0.5):
+            raise ValueError(f'Expected all(abs(xi, yi, ti) < (0.5, 0.5, 0.5))!')
+
+        dtype = data.dtype
+
+        ta = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - ti[:, None]
+        tb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - ti[:, None]
+        xa = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - xi[:, None]
+        xb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - xi[:, None]
+        ya = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - yi[:, None]
+        yb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - yi[:, None]
+
+        wt = ModelV2._K_core(tb) - ModelV2._K_core(ta)
+        wx = ModelV2._K_core(xb) - ModelV2._K_core(xa)
+        wy = ModelV2._K_core(yb) - ModelV2._K_core(ya)
+
+        w = wt[:, :, None, None] * wx[:, None, :, None] * wy[:, None, None, :]
+
+        return torch.einsum('bcnm,bcnm->b', data, w)
+
+    @staticmethod
+    def _K_core(
+        b: torch.Tensor
+    ):
+        """
+        Compute the integral of the cardinal cubic B-spline from -inf to b.
+        """
+        if b.ndim > 2:
+            raise ValueError(f'Expected b.ndim < 3, got {b.ndim}!')
+
+        outputs = torch.full_like(b, torch.nan)
+
+        idx_0 = b < -1
+        idx_1 = torch.logical_and(-1 <= b, b < -0.5)
+        idx_2 = torch.logical_and(-0.5 <= b, b < 0.5)
+        idx_3 = torch.logical_and(0.5 <= b, b < 1.)
+        idx_4 = 1 <= b
+
+        outputs[idx_0] = 0.
+        outputs[idx_1] = -2/3*b[idx_1]**4 + (8/3)*b[idx_1]**3 - 4*b[idx_1]**2 + (8/3)*b[idx_1] + (4/3)*torch.clamp(b[idx_1], max=0)**4 + 8*torch.clamp(b[idx_1], max=0)**2 + 2/3
+        outputs[idx_2] = 1 / 24 + 2*b[idx_2]**4 - 8/3*b[idx_2]**3 + (4/3)*b[idx_2] - 4*torch.clamp(b[idx_2], max=0)**4 + 11/24
+        outputs[idx_3] = 23 / 24 + -2/3*b[idx_3]**4 + (8/3)*b[idx_3]**3 - 4*b[idx_3]**2 + (8/3)*b[idx_3] - 5/8
+        outputs[idx_4] = 1.
+
+        return outputs
