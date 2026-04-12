@@ -52,7 +52,7 @@ def torch2np(d: torch.Tensor) -> np.ndarray:
     return d.numpy(force=True)
 
 
-class AdrNondim:
+class ForcedAdvectionDiffusion:
     u0: nn.Buffer
     """Normalization constant u0."""
     L0: nn.Buffer
@@ -100,7 +100,7 @@ class AdrNondim:
         self.f0 = nn.Buffer(torch.tensor(f0))
 
 
-class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
+class ModelV1(ForcedAdvectionDiffusion, nn.Module):
     s: nn.Buffer
     """Time delta (i.e., :math:`dt`)."""
     h: nn.Buffer
@@ -272,6 +272,8 @@ class SeaIceAdr_x5_5k3_t3_w32_d3(AdrNondim, nn.Module):
         ) + self.mix_b
         hidden = self.mlp(mixed)
         output = self.final(hidden)
+        kappa, velx, vely, force = self._unpack_outputs(output)
+        output = self._pack_outputs(nn.functional.softplus(kappa), velx, vely, force)  # softplus for positive diffusivity
 
         return output
 
