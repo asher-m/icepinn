@@ -2,6 +2,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
+from torch.func import jacfwd, vmap
 
 from pathlib import Path
 
@@ -52,7 +53,7 @@ def torch2np(d: torch.Tensor) -> np.ndarray:
     return d.numpy(force=True)
 
 
-class ForcedAdvectionDiffusion:
+class ForcedAdvectionDiffusion(nn.Module):
     u0: nn.Buffer
     """Normalization constant u0."""
     L0: nn.Buffer
@@ -98,6 +99,12 @@ class ForcedAdvectionDiffusion:
         self.k0 = nn.Buffer(torch.tensor(k0))
         self.v0 = nn.Buffer(torch.tensor(v0))
         self.f0 = nn.Buffer(torch.tensor(f0))
+
+    def save(self, path: str | Path):
+        torch.save(self.state_dict(), path)
+
+    def load(self, path: str | Path, **kwargs):
+        self.load_state_dict(torch.load(path), **kwargs)
 
 
 class ModelV1(ForcedAdvectionDiffusion, nn.Module):
@@ -214,12 +221,6 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
             nn.Tanh(),
         )
         self.final = nn.Linear(32, 4)
-
-    def save(self, path: str | Path):
-        torch.save(self.state_dict(), path)
-
-    def load(self, path: str | Path, **kwargs):
-        self.load_state_dict(torch.load(path), **kwargs)
 
     def _forward_patch(
             self,
@@ -510,6 +511,7 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
         self.h = nn.Buffer(torch.tensor(h))
 
         self.mlp = nn.Sequential(
+            nn.Linear(1, 32),
             nn.Tanh(),
             nn.Linear(32, 32),
             nn.Tanh(),
@@ -549,14 +551,29 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
         if torch.any(torch.abs(xi) > 0.5) or torch.any(torch.abs(yi) > 0.5) or torch.any(torch.abs(ti) > 0.5):
             raise ValueError(f'Expected all(abs(xi, yi, ti) < (0.5, 0.5, 0.5))!')
 
-        dtype = data.dtype
+        return ModelV2._K_impl(data, xi, yi, ti)
 
-        ta = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - ti[:, None]
-        tb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - ti[:, None]
-        xa = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - xi[:, None]
-        xb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - xi[:, None]
-        ya = torch.arange(3, dtype=dtype)[None, :] - 1 - 1/2 - yi[:, None]
-        yb = torch.arange(3, dtype=dtype)[None, :] - 1 + 1/2 - yi[:, None]
+    @staticmethod
+    def _K_impl(
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute the spline convolution without input validation so it can be used under torch.func transforms.
+        """
+
+        dtype = data.dtype
+        device = data.device
+        coord = torch.arange(3, dtype=dtype, device=device)[None, :]
+
+        ta = coord - 1 - 1/2 - ti[:, None]
+        tb = coord - 1 + 1/2 - ti[:, None]
+        xa = coord - 1 - 1/2 - xi[:, None]
+        xb = coord - 1 + 1/2 - xi[:, None]
+        ya = coord - 1 - 1/2 - yi[:, None]
+        yb = coord - 1 + 1/2 - yi[:, None]
 
         wt = ModelV2._K_core(tb) - ModelV2._K_core(ta)
         wx = ModelV2._K_core(xb) - ModelV2._K_core(xa)
@@ -576,18 +593,316 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
         if b.ndim > 2:
             raise ValueError(f'Expected b.ndim < 3, got {b.ndim}!')
 
-        outputs = torch.full_like(b, torch.nan)
-
         idx_0 = b < -1
         idx_1 = torch.logical_and(-1 <= b, b < -0.5)
         idx_2 = torch.logical_and(-0.5 <= b, b < 0.5)
         idx_3 = torch.logical_and(0.5 <= b, b < 1.)
-        idx_4 = 1 <= b
 
-        outputs[idx_0] = 0.
-        outputs[idx_1] = -2/3*b[idx_1]**4 + (8/3)*b[idx_1]**3 - 4*b[idx_1]**2 + (8/3)*b[idx_1] + (4/3)*torch.clamp(b[idx_1], max=0)**4 + 8*torch.clamp(b[idx_1], max=0)**2 + 2/3
-        outputs[idx_2] = 1 / 24 + 2*b[idx_2]**4 - 8/3*b[idx_2]**3 + (4/3)*b[idx_2] - 4*torch.clamp(b[idx_2], max=0)**4 + 11/24
-        outputs[idx_3] = 23 / 24 + -2/3*b[idx_3]**4 + (8/3)*b[idx_3]**3 - 4*b[idx_3]**2 + (8/3)*b[idx_3] - 5/8
-        outputs[idx_4] = 1.
+        out_1 = -2/3 * b**4 + (8/3) * b**3 - 4 * b**2 + (8/3) * b + (4/3) * torch.clamp(b, max=0)**4 + 8 * torch.clamp(b, max=0)**2 + 2/3
+        out_2 = 1 / 24 + 2 * b**4 - 8/3 * b**3 + (4/3) * b - 4 * torch.clamp(b, max=0)**4 + 11/24
+        out_3 = 23 / 24 - 2/3 * b**4 + (8/3) * b**3 - 4 * b**2 + (8/3) * b - 5/8
 
-        return outputs
+        return torch.where(
+            idx_0,
+            torch.zeros_like(b),
+            torch.where(
+                idx_1,
+                out_1,
+                torch.where(
+                    idx_2,
+                    out_2,
+                    torch.where(idx_3, out_3, torch.ones_like(b))
+                )
+            )
+        )
+
+    def _evaluate_outputs(
+        self,
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ) -> torch.Tensor:
+        outputs = ModelV2.K(data, xi, yi, ti).unsqueeze(-1)
+        outputs = self.final(self.mlp(outputs))
+        kappa, velx, vely, force = self._unpack_outputs(outputs)
+
+        return self._pack_outputs(nn.functional.softplus(kappa), velx, vely, force)
+
+    def _evaluate_outputs_single(
+        self,
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ) -> torch.Tensor:
+        outputs = ModelV2._K_impl(
+            data.unsqueeze(0),
+            xi.unsqueeze(0),
+            yi.unsqueeze(0),
+            ti.unsqueeze(0)
+        ).unsqueeze(-1)
+        outputs = self.final(self.mlp(outputs))
+        kappa, velx, vely, force = self._unpack_outputs(outputs)
+
+        return self._pack_outputs(nn.functional.softplus(kappa), velx, vely, force)[0]
+
+    @staticmethod
+    def _evaluate_local_single(
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ) -> torch.Tensor:
+        return ModelV2._K_impl(
+            data.unsqueeze(0),
+            xi.unsqueeze(0),
+            yi.unsqueeze(0),
+            ti.unsqueeze(0)
+        )[0]
+
+    def _compute_spatial_derivatives(
+        self,
+        fn,
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ):
+        dx = vmap(jacfwd(fn, argnums=1))(data, xi, yi, ti) / self.h
+        dy = vmap(jacfwd(fn, argnums=2))(data, xi, yi, ti) / self.h
+        dxx = vmap(jacfwd(jacfwd(fn, argnums=1), argnums=1))(data, xi, yi, ti) / self.h ** 2
+        dyy = vmap(jacfwd(jacfwd(fn, argnums=2), argnums=2))(data, xi, yi, ti) / self.h ** 2
+
+        return dx, dy, dxx, dyy
+
+    def forward(
+        self,
+        data: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor,
+        label: torch.Tensor | None = None
+    ):
+        """
+        Compute fit of network to data.
+
+        Accepts torch tensors as inputs.
+
+        Arguments:
+            data:       Tensor of shape (B, C, N, M) of data values about (t, x, y).
+            xi:         Tensor of shape (B,) of x index translation of kernel relative to data center.
+            yi:         Tensor of shape (B,) of y index translation of kernel relative to data center.
+            ti:         Tensor of shape (B,) of t index translation of kernel relative to data center.
+            label:      Tensor of shape (B,) of data interpolated at (ti + 1, xi, yi).
+        where B is batch size, number of time steps C = 4, number of x values N = 3 and number of y values M = 3.
+
+        C index increments upwards for latter times.
+        """
+        b, c, n, m = data.shape
+        if c != 4:
+            raise ValueError(f'Expected C = 4 timesteps, got {c}!')
+        if n != 3 or m != 3:
+            raise ValueError(f'Expected number of x values, y values (N, M) = (3, 3), got {(n, m)}!')
+        if xi.shape != (b,) or yi.shape != (b,) or ti.shape != (b,):
+            raise ValueError(f'Expected xi, yi, ti of shape (B,) = ({b},)!')
+        if label is not None and label.shape != (b,):
+            raise ValueError(f'Expected labels of shape (B,) = ({b},), got {label.shape}!')
+
+        current_data = data[:, :3, :, :]
+
+        outputs = self._evaluate_outputs(current_data, xi, yi, ti)
+        local = ModelV2.K(current_data, xi, yi, ti)
+        local_t = self._compute_rhs(current_data, outputs, xi, yi, ti)
+        prediction = local + local_t * self.s
+
+        if label is not None:
+            l_pred = (label - prediction) ** 2
+
+            outputs_x, outputs_y, outputs_xx, outputs_yy = self._compute_spatial_derivatives(
+                self._evaluate_outputs_single,
+                current_data,
+                xi,
+                yi,
+                ti
+            )
+            (
+                kappa_x,
+                velx_x,
+                vely_x,
+                force_x
+            ) = self._unpack_outputs(outputs_x)
+            (
+                kappa_y,
+                velx_y,
+                vely_y,
+                force_y
+            ) = self._unpack_outputs(outputs_y)
+            (
+                kappa_xx,
+                velx_xx,
+                vely_xx,
+                force_xx
+            ) = self._unpack_outputs(outputs_xx)
+            (
+                kappa_yy,
+                velx_yy,
+                vely_yy,
+                force_yy
+            ) = self._unpack_outputs(outputs_yy)
+            l_kappa_o1_reg = kappa_x ** 2 + kappa_y ** 2
+            l_vel_o1_reg = velx_x ** 2 + velx_y ** 2 + vely_x ** 2 + vely_y ** 2
+            l_force_o1_reg = force_x ** 2 + force_y ** 2
+            l_kappa_o2_reg = kappa_xx ** 2 + kappa_yy ** 2
+            l_vel_o2_reg = velx_xx ** 2 + velx_yy ** 2 + vely_xx ** 2 + vely_yy ** 2
+            l_force_o2_reg = force_xx ** 2 + force_yy ** 2
+
+            return (
+                prediction, 
+                torch.stack(
+                    (
+                        l_pred,
+                        l_kappa_o1_reg,
+                        l_vel_o1_reg,
+                        l_force_o1_reg,
+                        l_kappa_o2_reg,
+                        l_vel_o2_reg,
+                        l_force_o2_reg
+                    )
+                )
+            )
+
+        else:
+            return torch.cat(
+                (
+                    prediction.unsqueeze(-1),
+                    outputs
+                ),
+                dim=-1
+            )
+
+    def _compute_rhs(
+        self,
+        data: torch.Tensor,
+        outputs: torch.Tensor,
+        xi: torch.Tensor,
+        yi: torch.Tensor,
+        ti: torch.Tensor
+    ):
+        b, c, n, m = data.shape
+        if c != 3:
+            raise ValueError(f'Expected C = 3 timesteps, got {c}!')
+        if n != 3 or m != 3:
+            raise ValueError(f'Expected number of x values, y values (N, M) = (3, 3), got {(n, m)}!')
+        if xi.shape != (b,) or yi.shape != (b,) or ti.shape != (b,):
+            raise ValueError(f'Expected xi, yi, ti of shape (B,) = ({b},)!')
+
+        ob, oo = outputs.shape
+        if ob != b:
+            raise ValueError(f'Expected output batch size B = {b}, got {ob}!')
+        if oo != 4:
+            raise ValueError(f'Expected output channels O = 4, got {oo}!')
+
+        outputs_x, outputs_y, _, _ = self._compute_spatial_derivatives(
+            self._evaluate_outputs_single,
+            data,
+            xi,
+            yi,
+            ti
+        )
+        local_x, local_y, local_xx, local_yy = self._compute_spatial_derivatives(
+            self._evaluate_local_single,
+            data,
+            xi,
+            yi,
+            ti
+        )
+
+        (
+            kappa,
+            velx,
+            vely,
+            force
+        ) = self._unpack_outputs(outputs)
+        (
+            kappa_x,
+            velx_x,
+            _,
+            _
+        ) = self._unpack_outputs(outputs_x)
+        (
+            kappa_y,
+            _,
+            vely_y,
+            _
+        ) = self._unpack_outputs(outputs_y)
+
+        local = ModelV2.K(data, xi, yi, ti)
+
+        local_t = (
+            self.k0 * self.t0 / self.L0 ** 2 * (kappa_x * local_x + kappa_y * local_y + kappa * (local_xx + local_yy)) +
+            self.v0 * self.t0 / self.L0 * (local * (velx_x + vely_y) + local_x * velx + local_y * vely) * -1 +
+            self.f0 * self.t0 / self.u0 * force
+        )
+
+        return local_t
+
+    def _unpack_outputs(
+        self,
+        outputs: torch.Tensor,
+    ):
+        """
+        Unpack a outputs from :meth:`_forward`.
+
+        .. seealso::
+            See the complementary method :meth:`_pack_outputs`.
+
+        Accepts torch tensors as inputs.
+
+        Arguments:
+            outputs:      Tensor of shape (B, ..., O) of output values.
+        where B is batch size and number of output channels O = 4.
+
+        Returns a tuple of tensors.
+        """
+        kappa = outputs[..., 0]
+        velx = outputs[..., 1]
+        vely = outputs[..., 2]
+        force = outputs[..., 3]
+        return kappa, velx, vely, force
+
+    def _pack_outputs(
+        self,
+        kappa: torch.Tensor,
+        velx: torch.Tensor,
+        vely: torch.Tensor,
+        force: torch.Tensor,
+    ):
+        """
+        Pack output values as if from :meth:`_forward`.
+
+        .. seealso::
+            See the complementary method :meth:`_unpack_outputs`.
+
+        Accepts torch tensors as inputs.
+
+        Arguments:
+            soln:        Tensor of shape (B, ...) of solution.
+            kappa:       Tensor of shape (B, ...) of kappa.
+            velx:        Tensor of shape (B, ...) of vx.
+            vely:        Tensor of shape (B, ...) of vy.
+            force:       Tensor of shape (B, ...) of f.
+        where B is batch size.
+            
+        Returns a tensor of shape (B, ..., 4).
+        """
+        return torch.stack(
+            (
+                kappa,
+                velx,
+                vely,
+                force,
+            ),
+            dim=-1
+        )
+
