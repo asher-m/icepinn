@@ -106,6 +106,43 @@ class ForcedAdvectionDiffusion(nn.Module):
     def load(self, path: str | Path, **kwargs):
         self.load_state_dict(torch.load(path), **kwargs)
 
+    def _sobolev_regularization_terms(
+        self,
+        kappa: torch.Tensor,
+        velx: torch.Tensor,
+        vely: torch.Tensor,
+        force: torch.Tensor,
+        kappa_x: torch.Tensor,
+        velx_x: torch.Tensor,
+        vely_x: torch.Tensor,
+        force_x: torch.Tensor,
+        kappa_y: torch.Tensor,
+        velx_y: torch.Tensor,
+        vely_y: torch.Tensor,
+        force_y: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """
+        Compute zeroth- and first-order Sobolev-style penalties for the parameter fields.
+        """
+        l_kappa_o0_reg = kappa.square()
+        l_vel_o0_reg = velx.square() + vely.square()
+        l_force_o0_reg = force.square()
+
+        l_kappa_o1_reg = self.k0.square() * (kappa_x.square() + kappa_y.square())
+        l_vel_o1_reg = self.v0.square() * (
+            velx_x.square() + velx_y.square() + vely_x.square() + vely_y.square()
+        )
+        l_force_o1_reg = self.f0.square() * (force_x.square() + force_y.square())
+
+        return (
+            l_kappa_o0_reg,
+            l_vel_o0_reg,
+            l_force_o0_reg,
+            l_kappa_o1_reg,
+            l_vel_o1_reg,
+            l_force_o1_reg,
+        )
+
 
 class ModelV1(ForcedAdvectionDiffusion, nn.Module):
     s: nn.Buffer
@@ -304,6 +341,12 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
 
         if label is not None:
             l_pred = (label - prediction) ** 2
+            (
+                kappa,
+                velx,
+                vely,
+                force
+            ) = self._unpack_outputs(outputs[:, 1, 1, :])
 
             (
                 kappa_x,
@@ -318,35 +361,38 @@ class ModelV1(ForcedAdvectionDiffusion, nn.Module):
                 force_y 
             ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_y))
             (
-                kappa_xx,
-                velx_xx,
-                vely_xx,
-                force_xx 
-            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_xx))
-            (
-                kappa_yy,
-                velx_yy,
-                vely_yy,
-                force_yy 
-            ) = self._unpack_outputs(torch.einsum('bnmo,nm->bo', outputs, self.k_yy))
-            l_kappa_o1_reg = kappa_x ** 2 + kappa_y ** 2
-            l_vel_o1_reg = velx_x ** 2 + velx_y ** 2 + vely_x ** 2 + vely_y **2
-            l_force_o1_reg = force_x ** 2 + force_y **2
-            l_kappa_o2_reg = kappa_xx **2 + kappa_yy ** 2
-            l_vel_o2_reg = velx_xx ** 2 + velx_yy ** 2 + vely_xx ** 2 + vely_yy ** 2
-            l_force_o2_reg = force_xx ** 2 + force_yy ** 2
+                l_kappa_o0_reg,
+                l_vel_o0_reg,
+                l_force_o0_reg,
+                l_kappa_o1_reg,
+                l_vel_o1_reg,
+                l_force_o1_reg,
+            ) = self._sobolev_regularization_terms(
+                kappa,
+                velx,
+                vely,
+                force,
+                kappa_x,
+                velx_x,
+                vely_x,
+                force_x,
+                kappa_y,
+                velx_y,
+                vely_y,
+                force_y,
+            )
 
             return (
                 prediction, 
                 torch.stack(
                     (
                         l_pred,
+                        l_kappa_o0_reg,
+                        l_vel_o0_reg,
+                        l_force_o0_reg,
                         l_kappa_o1_reg,
                         l_vel_o1_reg,
-                        l_force_o1_reg,
-                        l_kappa_o2_reg,
-                        l_vel_o2_reg,
-                        l_force_o2_reg
+                        l_force_o1_reg
                     )
                 )
             )
@@ -667,12 +713,17 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
         data: torch.Tensor,
         xi: torch.Tensor,
         yi: torch.Tensor,
-        ti: torch.Tensor
+        ti: torch.Tensor,
+        second_order: bool = True
     ):
         dx = vmap(jacfwd(fn, argnums=1))(data, xi, yi, ti) / self.h
         dy = vmap(jacfwd(fn, argnums=2))(data, xi, yi, ti) / self.h
-        dxx = vmap(jacfwd(jacfwd(fn, argnums=1), argnums=1))(data, xi, yi, ti) / self.h ** 2
-        dyy = vmap(jacfwd(jacfwd(fn, argnums=2), argnums=2))(data, xi, yi, ti) / self.h ** 2
+        if second_order:
+            dxx = vmap(jacfwd(jacfwd(fn, argnums=1), argnums=1))(data, xi, yi, ti) / self.h ** 2
+            dyy = vmap(jacfwd(jacfwd(fn, argnums=2), argnums=2))(data, xi, yi, ti) / self.h ** 2
+        else:
+            dxx = None
+            dyy = None
 
         return dx, dy, dxx, dyy
 
@@ -718,13 +769,20 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
 
         if label is not None:
             l_pred = (label - prediction) ** 2
+            (
+                kappa,
+                velx,
+                vely,
+                force
+            ) = self._unpack_outputs(outputs)
 
-            outputs_x, outputs_y, outputs_xx, outputs_yy = self._compute_spatial_derivatives(
+            outputs_x, outputs_y, _, _ = self._compute_spatial_derivatives(
                 self._evaluate_outputs_single,
                 current_data,
                 xi,
                 yi,
-                ti
+                ti,
+                second_order=False
             )
             (
                 kappa_x,
@@ -739,35 +797,38 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
                 force_y
             ) = self._unpack_outputs(outputs_y)
             (
-                kappa_xx,
-                velx_xx,
-                vely_xx,
-                force_xx
-            ) = self._unpack_outputs(outputs_xx)
-            (
-                kappa_yy,
-                velx_yy,
-                vely_yy,
-                force_yy
-            ) = self._unpack_outputs(outputs_yy)
-            l_kappa_o1_reg = kappa_x ** 2 + kappa_y ** 2
-            l_vel_o1_reg = velx_x ** 2 + velx_y ** 2 + vely_x ** 2 + vely_y ** 2
-            l_force_o1_reg = force_x ** 2 + force_y ** 2
-            l_kappa_o2_reg = kappa_xx ** 2 + kappa_yy ** 2
-            l_vel_o2_reg = velx_xx ** 2 + velx_yy ** 2 + vely_xx ** 2 + vely_yy ** 2
-            l_force_o2_reg = force_xx ** 2 + force_yy ** 2
+                l_kappa_o0_reg,
+                l_vel_o0_reg,
+                l_force_o0_reg,
+                l_kappa_o1_reg,
+                l_vel_o1_reg,
+                l_force_o1_reg,
+            ) = self._sobolev_regularization_terms(
+                kappa,
+                velx,
+                vely,
+                force,
+                kappa_x,
+                velx_x,
+                vely_x,
+                force_x,
+                kappa_y,
+                velx_y,
+                vely_y,
+                force_y,
+            )
 
             return (
                 prediction, 
                 torch.stack(
                     (
                         l_pred,
+                        l_kappa_o0_reg,
+                        l_vel_o0_reg,
+                        l_force_o0_reg,
                         l_kappa_o1_reg,
                         l_vel_o1_reg,
-                        l_force_o1_reg,
-                        l_kappa_o2_reg,
-                        l_vel_o2_reg,
-                        l_force_o2_reg
+                        l_force_o1_reg
                     )
                 )
             )
@@ -808,7 +869,8 @@ class ModelV2(ForcedAdvectionDiffusion, nn.Module):
             data,
             xi,
             yi,
-            ti
+            ti,
+            second_order=False
         )
         local_x, local_y, local_xx, local_yy = self._compute_spatial_derivatives(
             self._evaluate_local_single,
