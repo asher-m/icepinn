@@ -1,4 +1,4 @@
-# NeuralPDE for Sea Ice
+# IcePINN
 Research code for solving the forced advection-diffusion inverse problem for polar sea ice concentration.
 
 
