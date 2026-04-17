@@ -140,8 +140,6 @@ python -m pip install --editable .
 ### Version 6
 See [this](https://nsidc.org/data/g02202/versions/6) for more information on NOAA/NSIDC sea ice concentration data format 6.  In particular, the user manual is of significant aid.
 
-**Note that none of the codebase has yet been updated to support V6 data.**  Work for V6 data is in progress.
-
 #### Downloading Data Files
 Download data files from [this link](https://noaadata.apps.nsidc.org/NOAA/G02202_V6/north/aggregate/) (note that this link can also be found from the NOAA/NSIDC landing page, above.)  A tool like wget can be of particular aid.  From the project root, run something like the following command:
 ```shell
@@ -149,3 +147,5 @@ mkdir -p data/V6/
 cd data/V6/
 wget --recursive --no-parent --no-host-directories --cut-dirs 4 --timestamping --execute robots=off https://noaadata.apps.nsidc.org/NOAA/G02202_V6/north/aggregate/
 ```
+
+For various notebooks in this repository, you will need to prepare the data to be used.  To do so, run the notebook prepdata.ipynb.
