@@ -23,7 +23,7 @@ I'm going to use a somewhat abstract definition of a PINN to illustrate its exte
 
 Raissi et al. (2019) introduce physics-informed neural networks (PINNs) as an MLP-type neural network that predicts the state variable, in our case $c$.  The key innovation of Raissi was to use automatic differentiation of the neural network to compute the PDE residual.  Thus, the thinking was that one could "trust" the results of PINN more than a purely data-driven model which made no such guarantees.
 
-Here's what that looks like analytically: consider some PDE $c_t = D[c; \beta]$ in a domain $\Omega = \mathbf{X} \times \mathbb{R}_+$ (note that this technique generalizes beyond space-time domains but I need to nail things down to prevent this from becoming nonsense).  Boundary data $g$ may be prescribed on some boundary $B \subset \partial\Omega$.  Data are known on the interior of the domain like $u|_\Gamma = v$ for $\Gamma \subset \Omega$ such that $\mathrm{codim}(\Gamma) > 0$.
+Here's what that looks like analytically: consider some PDE $c_t = D[c; \beta]$ in a domain $\Omega = \mathbf{X} \times \mathbb{R}_+$ (note that this technique generalizes beyond space-time domains, but I need to nail things down to prevent this from becoming nonsense).  Boundary data $g$ may be prescribed on some boundary $B \subset \partial\Omega$.  Data are known on the interior of the domain like $u|_\Gamma = v$ for $\Gamma \subset \Omega$ such that $\mathrm{codim}(\Gamma) > 0$.
 
 Let some coordinate $\chi = (\mathbf{x}, t)$ such that for a neural network $\mathcal{N}$ the state variable is predicted by
 ```math
@@ -60,7 +60,7 @@ for the neural solution operator $\mathcal{N}$, where $k_i * v$ is a the convolu
 
 In particular,
 ```math
-(k_i * v)(\mathbf{x},\, t) = \int_{\mathrm{supp}(k_i)} k_i(\mathbf{x},\, t;\, \mathbf{x}',\, t') \, v(\mathbf{x}', t') \, d\lambda(\mathbf{x})
+(k_i * v)(\mathbf{x},\, t) = \int_{\mathrm{supp}(k_i)} k_i(\mathbf{x},\, t;\, \mathbf{x}',\, t') \, v(\mathbf{x} - \mathbf{x}',\, t - t') \, d\lambda(\mathbf{x})
 ```
 for $\lambda$ the Lebesgue measure.
 
@@ -74,9 +74,58 @@ Then,
 \end{aligned}
 ```
 
-The benefit of this formulation, again at least heuristically sepaking, is that the neural network is able to learn the relevant space-time context (i.e., view of state variable) and the dependence of the solution on data.
+The benefit of this formulation, again at least heuristically speaking, is that the neural network is able to learn the relevant space-time context (i.e., view of state variable) and the dependence of the solution on data.
 
-It is a matter of investigation if prescribing structure to the kernels $k_i$ is helpful or informative.  Certain choices of $k_i$ are 1-to-1 reproductions of certain formulations of PINNs where certain features of the data are provided to the network (e.g., Fourier feature PINNs).
+In the case of the forward problem, we consider only causal kernels.  In particular, a kernel is causal if and only if,
+```math
+k(t,\, t') = 0 \qquad \text{for all } t' > t.
+```
+In the inverse problem (where the task is only parameter identification), we consider non-causal kernels.  Similarly to above,
+```math
+k(t,\, t') \neq 0 \qquad \text{for some } t' > t.
+```
+
+It's worth noting that it is a matter of investigation if prescribing additional kernel structure beyond its support helpful or informative.  Certain choices of $k_i$ are 1-to-1 reproductions of certain formulations of PINNs where certain features of the data are provided to the network (e.g., Fourier feature PINNs).
+
+
+## Differentiable Proxy for Data
+In order to evaluate the PDE residual via automatic differentiation, the solution must have a continuously differentiable dependence on the space-time coordinate $(\mathbf{x}, t)$ up to the order of the PDE.  There are circumstances when this space-time dependence will not be captured by the convolution kernel $k_i$ (i.e., discrete convolution).  Instead, we prescribe a dependence on the space-time coordinate.  In particular, we choose an interpolant that approximates the space-time variation of our data.
+
+We *could* construct an exact interpolant, but, in general, this requires solving a system of $N$ equations, where $N$ is the number of observations.  For the sea ice problem, $N \sim 2 \times 10^9$ corresponding to $\sim 20$ GB of data.  This is too large to handle easily, so we'll work around this limitation.  In fact, even if we use a compactly supported interpolant, the resulting sparse system could still be on the order of hundreds of GB *to store in memory*.  It's worth noting that there's plenty of research that works on problems of this size (and larger), but to my knowledge routines to handle systems of this size aren't exactly "ready to go" in the sense of most other common linear algebra tools.  Instead, we construct a quasi-interpolant computed from a compact local subset of the data.
+
+In the implementation used in this code base, this is works as follows: suppose we have discrete data $\sigma_\delta$ like
+```math
+\sigma_\delta: \{\mathbf{x}_i\}_{i=1}^{N_x} \times \{t_n\}_{n=1}^{N_t} \longrightarrow \mathbb{R}.
+```
+Essentially, we consider data on a rectangular lattice of points.
+
+Interstitially, we define a piecewise-constant interpolant $\bar{\sigma}$ such that
+```math
+\bar{\sigma} : \mathrm{Convex~Hull}\left[ \{\mathbf{x}_i\}_{i=1}^{N_x} \times \{t_n\}_{n=1}^{N_t} \right] \longrightarrow \mathbb{R}
+```
+where
+```math
+\bar{\sigma}(\mathbf{x},\, t) = \sigma_\delta \left[ \argmin_i \| \mathbf{x} - \mathbf{x}_i\|,\, \argmin_n | t - t_n | \right].
+```
+Note that the domain of $\bar{\sigma}$ can sensibly be extended by $\Delta x / 2$ both forward and backward in each spatial dimension and $\Delta t / 2$ in time.
+
+Finally, we construct a smooth interpolant by convolution against a tensor product cardinal cubic B-spline interpolant.  Precisely,
+```math
+v(\mathbf{x},\, t) = \int_{\mathrm{supp}(b)} b(\mathbf{x}' - \mathbf{x},\, t' - t)\, \bar{\sigma}(\mathbf{x}',\, \mathbf{t}') \, d\lambda(\mathbf{x}',\, t)
+```
+where $\lambda$ is the Lebesgue measure, and $b$ is
+```math
+b(\mathbf{x},\, t) = \left[ \prod_{i=1}^{\mathrm{dim}(\mathbf{X})} b_s(\mathbf{x}_i;\, \Delta x) \right] b_s(t;\, \Delta t)
+```
+where
+```math
+b_s(z;\, r) = \begin{cases}
+    \dfrac{4}{3 r} - \dfrac{8 z^2}{r^3} + \dfrac{8 |z|^3}{r^4} & |z|<\dfrac{r}{2} \\[1em]
+    \dfrac{8 (r - |z|)^3}{3 r^4} & \dfrac{r}{2} \le |z| < r \\[1em]
+    0 & |z| \ge r.
+\end{cases}
+```
+Note that we assume each spatial dimension has equal grid space $\Delta x$.  It is a small change to construct a method for differing grid spacing in each spatial dimension.
 
 
 ## Diagrams
